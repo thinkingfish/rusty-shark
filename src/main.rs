@@ -1,6 +1,7 @@
 mod cli;
 mod dissect;
 mod pcap;
+mod pcapng;
 mod pipeline;
 mod print;
 
