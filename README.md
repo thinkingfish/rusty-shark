@@ -28,6 +28,9 @@ capture order.
 - Network layer: IPv4, IPv6, ARP.
 - Transport: TCP (flags, seq/ack/win), UDP, ICMP, ICMPv6.
 - Well-known UDP upper-layer labels: DNS (with qname), DHCP, NTP, mDNS.
+- **RDMA / datacenter:** RoCEv2 (InfiniBand BTH over UDP/4791) — opcode,
+  Dest QP, PSN, RETH/AETH extended headers, CNP, and ECN/FECN/BECN
+  congestion flags. See `docs/tshark-analysis/datacenter-roadmap.md`.
 - Parallel dissection (`rayon`), reader-batched for bounded memory.
 - `-c N`, `-q`, `-j N`, `--no-parallel`, `--batch N` CLI flags.
 
@@ -57,6 +60,7 @@ capture order.
     src/pcap.rs       — classic pcap reader + CaptureReader dispatch
     src/pcapng.rs     — pcapng reader (SHB / IDB / EPB / SPB)
     src/dissect.rs    — per-packet stateless dissectors
+    src/roce.rs       — RoCEv2 / InfiniBand BTH dissection
     src/print.rs      — column-summary formatting
     src/pipeline.rs   — reader → parallel dissect → ordered print
 

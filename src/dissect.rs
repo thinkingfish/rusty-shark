@@ -292,7 +292,11 @@ fn dissect_udp(data: &[u8], s: &mut Summary, _is_ipv6: bool) {
     // A couple of well-known upper-layer labels so output is slightly less
     // opaque. We don't attempt to decode payloads.
     let payload = &data[8..];
-    if sport == 53 || dport == 53 {
+    if dport == crate::roce::ROCE_V2_UDP_PORT || sport == crate::roce::ROCE_V2_UDP_PORT {
+        // RoCEv2: InfiniBand transport over UDP/4791. The destination port
+        // is the reliable indicator; the source port is flow entropy.
+        crate::roce::dissect(payload, s);
+    } else if sport == 53 || dport == 53 {
         dissect_dns(payload, s);
     } else if sport == 67 || sport == 68 || dport == 67 || dport == 68 {
         s.protocol = "DHCP";

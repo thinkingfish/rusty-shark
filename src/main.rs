@@ -4,6 +4,7 @@ mod pcap;
 mod pcapng;
 mod pipeline;
 mod print;
+mod roce;
 
 use std::process::ExitCode;
 
