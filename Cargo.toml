@@ -1,0 +1,19 @@
+[package]
+name = "rusty-shark"
+version = "0.1.0"
+edition = "2021"
+description = "Parallel tshark-style pcap dissector, written in Rust"
+license = "GPL-2.0-or-later"
+
+[[bin]]
+name = "rshark"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
