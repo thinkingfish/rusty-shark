@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use crate::cli::Args;
 use crate::dissect::{self, Summary};
-use crate::pcap::{LinkType, PcapReader, RawPacket};
+use crate::pcap::{CaptureReader, RawPacket};
 use crate::print::{FrameMeta, column, format_line};
 
 pub fn run(args: &Args) -> Result<()> {
@@ -17,8 +17,7 @@ pub fn run(args: &Args) -> Result<()> {
             .build_global();
     }
 
-    let mut reader = PcapReader::open(&args.read_file)?;
-    let link = reader.link_type();
+    let mut reader = CaptureReader::open(&args.read_file)?;
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
@@ -37,7 +36,7 @@ pub fn run(args: &Args) -> Result<()> {
             break;
         }
 
-        flush_batch(&mut out, link, &mut batch, args)?;
+        flush_batch(&mut out, &mut batch, args)?;
     }
 
     out.flush()?;
@@ -45,7 +44,7 @@ pub fn run(args: &Args) -> Result<()> {
 }
 
 fn fill_batch<R: std::io::Read>(
-    reader: &mut PcapReader<R>,
+    reader: &mut CaptureReader<R>,
     batch: &mut Vec<(FrameMeta, RawPacket)>,
     cap: usize,
     reference: &mut Option<(u32, u32)>,
@@ -69,7 +68,6 @@ fn fill_batch<R: std::io::Read>(
 
 fn flush_batch<W: Write>(
     out: &mut W,
-    link: LinkType,
     batch: &mut Vec<(FrameMeta, RawPacket)>,
     args: &Args,
 ) -> Result<()> {
@@ -77,11 +75,11 @@ fn flush_batch<W: Write>(
     // over a single packet. The batch is an owned `Vec`, so `par_iter` hands
     // each worker a slice of it with no aliasing.
     let summaries: Vec<Summary> = if args.no_parallel {
-        batch.iter().map(|(_, p)| dissect::dissect(link, p)).collect()
+        batch.iter().map(|(_, p)| dissect::dissect(p)).collect()
     } else {
         batch
             .par_iter()
-            .map(|(_, p)| dissect::dissect(link, p))
+            .map(|(_, p)| dissect::dissect(p))
             .collect()
     };
 

@@ -16,7 +16,13 @@ capture order.
 ## What works today
 
 - Classic `pcap` file input (little- and big-endian, µs and ns
-  timestamps).  pcapng is not yet supported.
+  timestamps).
+- `pcapng` file input: Section Header Block, Interface Description
+  Block (with `if_tsresol` for timestamp resolution), Enhanced Packet
+  Block, Simple Packet Block. Multi-interface files with mixed link
+  types are handled. Non-packet block types (name resolution,
+  interface statistics, decryption secrets, custom) are skipped.
+- Automatic format detection at open time (`CaptureReader`).
 - Link layer: Ethernet (incl. one level of VLAN), Linux SLL, BSD Null
   loopback, DLT_RAW.
 - Network layer: IPv4, IPv6, ARP.
@@ -48,7 +54,8 @@ capture order.
 
     src/main.rs       — CLI entry
     src/cli.rs        — argument definitions
-    src/pcap.rs       — classic pcap file reader
+    src/pcap.rs       — classic pcap reader + CaptureReader dispatch
+    src/pcapng.rs     — pcapng reader (SHB / IDB / EPB / SPB)
     src/dissect.rs    — per-packet stateless dissectors
     src/print.rs      — column-summary formatting
     src/pipeline.rs   — reader → parallel dissect → ordered print

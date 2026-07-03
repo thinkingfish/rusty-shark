@@ -42,10 +42,10 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
 
-pub fn dissect(link: LinkType, pkt: &RawPacket) -> Summary {
+pub fn dissect(pkt: &RawPacket) -> Summary {
     let mut s = Summary::new(pkt.orig_len);
     let data = &pkt.data[..];
-    match link {
+    match pkt.link_type {
         LinkType::Ethernet => dissect_ethernet(data, &mut s),
         LinkType::RawIp => dissect_ip_auto(data, &mut s),
         LinkType::Null => dissect_null(data, &mut s),
@@ -426,6 +426,7 @@ mod tests {
             ts_sec: 0,
             ts_nsec: 0,
             orig_len: len,
+            link_type: LinkType::Ethernet,
             data,
         }
     }
@@ -459,7 +460,7 @@ mod tests {
     #[test]
     fn dissect_tcp_syn_ipv4_over_ethernet() {
         let pkt = raw(tcp_syn_frame());
-        let s = dissect(LinkType::Ethernet, &pkt);
+        let s = dissect(&pkt);
         assert_eq!(s.protocol, "TCP");
         assert_eq!(s.src, "192.168.0.1");
         assert_eq!(s.dst, "192.168.0.2");
@@ -484,7 +485,7 @@ mod tests {
         ];
         eth.extend_from_slice(&arp);
         let pkt = raw(eth);
-        let s = dissect(LinkType::Ethernet, &pkt);
+        let s = dissect(&pkt);
         assert_eq!(s.protocol, "ARP");
         assert_eq!(s.src, "10.0.0.1");
         assert_eq!(s.dst, "10.0.0.2");
@@ -524,7 +525,7 @@ mod tests {
         frame.extend_from_slice(&ipv4);
         frame.extend_from_slice(&[0; 8]); // too-short TCP
         let pkt = raw(frame);
-        let s = dissect(LinkType::Ethernet, &pkt);
+        let s = dissect(&pkt);
         assert_eq!(s.protocol, "TCP");
         assert!(s.info.contains("truncated"));
     }
