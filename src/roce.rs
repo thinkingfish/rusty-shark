@@ -99,14 +99,12 @@ pub fn dissect(payload: &[u8], d: &mut Dissection) {
         format!("BECN: {}", becn as u8),
     );
 
-    // Opcode-driven dispatch to the following extended transport header.
-    // This is the core BTH pattern: the operation determines what comes next.
+    // Opcode-driven dispatch to the following extended transport headers.
+    // This is the core BTH pattern: the operation determines what comes
+    // next, and some operations carry more than one (e.g. RDMA WRITE Only
+    // with Immediate is RETH followed by ImmDt).
     let ext = &payload[BTH_LEN..];
-    match ext_header_for(opcode) {
-        ExtHeader::Reth => append_reth(ext, &mut info, &mut node),
-        ExtHeader::Aeth => append_aeth(ext, &mut info, &mut node),
-        ExtHeader::None => {}
-    }
+    decode_ext_headers(opcode, ext, &mut info, &mut node);
 
     // Trailing flags of interest for congestion / reliability debugging.
     let mut flags: Vec<&str> = Vec::new();
@@ -134,36 +132,37 @@ pub fn dissect(payload: &[u8], d: &mut Dissection) {
     d.tree.push(node);
 }
 
-/// Which extended header, if any, immediately follows the BTH for a given
-/// opcode. Only the two most common are wired up for the MVP.
-enum ExtHeader {
-    Reth,
-    Aeth,
-    None,
-}
-
-fn ext_header_for(opcode: u8) -> ExtHeader {
+/// Append every extended transport header carried by this opcode, in
+/// order, advancing through `ext`. RC/UC/RD share the base RDMA-family
+/// operation numbering, so the operation bits select the headers.
+fn decode_ext_headers(opcode: u8, ext: &[u8], info: &mut String, node: &mut Node) {
     let op = opcode & 0x1f;
     let svc = opcode >> 5;
-    // RC (0) and UC (1) and RD (2) share the base operation numbering for
-    // the RDMA family; we only need the operation bits to pick the header.
-    match svc {
-        0..=2 => match op {
-            // RDMA WRITE First / Only, RDMA WRITE Only w/ Imm, RDMA READ Request
-            0x06 | 0x0a | 0x0b | 0x0c => ExtHeader::Reth,
-            // Acknowledge, ATOMIC Acknowledge
-            0x11 | 0x12 => ExtHeader::Aeth,
-            _ => ExtHeader::None,
-        },
-        _ => ExtHeader::None,
+    if svc > 2 {
+        return; // UD/CNP/XRC extended headers not decoded here
+    }
+    let mut off = 0usize;
+    // RETH: RDMA WRITE First/Only, WRITE Only w/ Imm, READ Request.
+    if matches!(op, 0x06 | 0x0a | 0x0b | 0x0c) {
+        off += append_reth(&ext[off.min(ext.len())..], info, node);
+    }
+    // AETH: Acknowledge, ATOMIC Acknowledge.
+    if matches!(op, 0x11 | 0x12) {
+        off += append_aeth(&ext[off.min(ext.len())..], info, node);
+    }
+    // ImmDt: the "with Immediate" variants — SEND (0x03/0x05) and RDMA
+    // WRITE (0x09/0x0b). For WRITE Only w/ Imm it follows the RETH above.
+    if matches!(op, 0x03 | 0x05 | 0x09 | 0x0b) {
+        append_immdt(&ext[off.min(ext.len())..], info, node);
     }
 }
 
 /// RDMA Extended Transport Header: virtual address, remote key, DMA length.
-fn append_reth(ext: &[u8], info: &mut String, node: &mut Node) {
+/// Returns the number of bytes consumed.
+fn append_reth(ext: &[u8], info: &mut String, node: &mut Node) -> usize {
     if ext.len() < 16 {
         info.push_str(" RETH=<truncated>");
-        return;
+        return ext.len();
     }
     let va = u64::from_be_bytes(ext[0..8].try_into().unwrap());
     let r_key = u32::from_be_bytes([ext[8], ext[9], ext[10], ext[11]]);
@@ -187,13 +186,32 @@ fn append_reth(ext: &[u8], info: &mut String, node: &mut Node) {
         Value::Uint(dma_len as u64),
         format!("DMA Length: {dma_len}"),
     );
+    16
+}
+
+/// Immediate Data Extended Transport Header: 4 bytes of opaque immediate
+/// data delivered to the receiver's completion queue.
+fn append_immdt(ext: &[u8], info: &mut String, node: &mut Node) -> usize {
+    if ext.len() < 4 {
+        info.push_str(" ImmDt=<truncated>");
+        return ext.len();
+    }
+    let imm = u32::from_be_bytes([ext[0], ext[1], ext[2], ext[3]]);
+    let _ = write!(info, " ImmDt=0x{imm:08x}");
+    node.add(
+        "infiniband.immdt.immediatedata",
+        Value::Uint(imm as u64),
+        format!("Immediate Data: 0x{imm:08x}"),
+    );
+    4
 }
 
 /// ACK Extended Transport Header: syndrome + message sequence number.
-fn append_aeth(ext: &[u8], info: &mut String, node: &mut Node) {
+/// Returns the number of bytes consumed.
+fn append_aeth(ext: &[u8], info: &mut String, node: &mut Node) -> usize {
     if ext.len() < 4 {
         info.push_str(" AETH=<truncated>");
-        return;
+        return ext.len();
     }
     let syndrome = ext[0];
     let msn = u24_be(&ext[1..4]);
@@ -214,6 +232,7 @@ fn append_aeth(ext: &[u8], info: &mut String, node: &mut Node) {
         format!("Message Sequence Number: {msn}"),
     );
     let _ = write!(info, " {kind} Syndrome=0x{syndrome:02x} MSN={msn}");
+    4
 }
 
 /// Human-readable BTH opcode name. The high 3 bits select the transport

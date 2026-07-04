@@ -29,8 +29,11 @@ capture order.
 - Transport: TCP (flags, seq/ack/win), UDP, ICMP, ICMPv6.
 - Well-known UDP upper-layer labels: DNS (with qname), DHCP, NTP, mDNS.
 - **RDMA / datacenter:** RoCEv2 (InfiniBand BTH over UDP/4791) — opcode,
-  Dest QP, PSN, RETH/AETH extended headers, CNP, and ECN/FECN/BECN
-  congestion flags. See `docs/tshark-analysis/datacenter-roadmap.md`.
+  Dest QP, PSN, RETH/AETH/ImmDt extended headers, CNP, and ECN/FECN/BECN
+  congestion flags. Fabric flow control: IEEE 802.3x PAUSE and 802.1Qbb
+  PFC (per-priority pause) via ethertype 0x8808. IP ECN codepoints named
+  (Not-ECT / ECT(0) / ECT(1) / CE) for v4 and v6. See
+  `docs/tshark-analysis/datacenter-roadmap.md`.
 - Parallel dissection (`rayon`), reader-batched for bounded memory.
 - **Protocol detail tree** with typed, named fields behind every
   dissector: `-V` prints the full tree (tshark-style), `-e <field>`
@@ -44,12 +47,15 @@ capture order.
   `-Y 'infiniband.bth.destqp == 0x123'`,
   `-Y 'ip.dsfield.ecn == 3'` (ECN-marked),
   `-Y 'infiniband.bth.opcode == 0x11 || infiniband.bth.opcode == 0x81'`.
-- **RoCE PSN analysis** (`-z roce,psn`): per-queue-pair sequence
-  tracking that reports dropped packets, reordering/duplicates, and
-  retransmits, with the frame where each QP's first anomaly appears.
-  Keyed by (destination IP, destination QP); 24-bit PSN wrap handled;
-  covers all packets read, independent of any `-Y` filter. This is the
-  QP-shardable analysis the parallel design was built for.
+- **RoCE analysis** (`-z`): per-queue-pair statistics reports, keyed by
+  (destination IP, destination QP), covering all packets read
+  independent of any `-Y` filter:
+  - `-z roce,psn` — sequence tracking: dropped packets, reordering /
+    duplicates, retransmits, and the frame where each QP's first anomaly
+    appears (24-bit PSN wrap handled). The QP-shardable analysis the
+    parallel design was built for.
+  - `-z roce,cong` — congestion: per-QP count of ECN CE-marked packets
+    and CNPs, exposing the DCQCN loop (CE marks upstream → CNPs back).
 - `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `-z`, `--no-parallel`,
   `--batch N`.
 

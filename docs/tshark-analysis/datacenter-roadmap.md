@@ -60,7 +60,9 @@ port mirroring, whereas native InfiniBand needs tap hardware.
   most valuable RoCE diagnostic. *(Done, M5: `-z roce,psn`,
   `src/analysis.rs`.)*
 - **Multi-packet message reassembly** (First/Middle/Last/Only).
-- **Congestion correlation** — ECN-marked → CNP → rate reaction. *(M4.)*
+- **Congestion correlation** — ECN-marked → CNP → rate reaction.
+  *(Done, M4: `-z roce,cong` reports per-QP CE marks and CNPs; PFC pause
+  frames dissected.)*
 
 ## Parallelism fit
 
@@ -95,13 +97,15 @@ but scoped to this domain:
 | **M1** | RoCEv2 BTH summary slice (MVP — DONE) | Detect UDP/4791, decode BTH opcode + Dest QP + PSN, dispatch to RETH/AETH, surface CNP and ECN/FECN/BECN flags, in the existing summary line |
 | **M2** | Field-tree model + `-V` + `-e` (DONE) | Typed named fields (`infiniband.bth.*`, `ip.*`, `tcp.*`, ...) on every dissector; `-V` verbose tree; `-e <field>` extraction |
 | **M3** | Display filters over the field tree (DONE) | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
-| **M5** | **QP-sharded, PSN-aware analysis pass (DONE in this PR)** | `-z roce,psn`: per-QP drop / reorder / retransmit detection keyed by (dst IP, dst QP), 24-bit PSN wrap handled, first-anomaly frame reported |
-| M4 | Congestion + fabric tier | ECN surfacing, CNP correlation, PFC pause frames, remaining ext headers |
+| **M5** | QP-sharded, PSN-aware analysis pass (DONE) | `-z roce,psn`: per-QP drop / reorder / retransmit detection keyed by (dst IP, dst QP), 24-bit PSN wrap handled, first-anomaly frame reported |
+| **M4** | **Congestion + fabric tier (DONE in this PR)** | PFC (802.1Qbb) + PAUSE (802.3x) via ethertype 0x8808; ECN codepoints named (v4/v6); `-z roce,cong` per-QP CE-marked + CNP counts; ImmDt extended header |
 | M6 | RDMA ULPs | NVMe-oF/RDMA first, then iSER / SMB Direct / IPoIB |
 | M7 | Native InfiniBand + RoCEv1 | LRH/GRH, DLT 247, ethertype 0x8915 |
 
-M5 landed ahead of M4 as the higher-value RDMA diagnostic and the
-payoff for the QP-shardable parallel design.
+M5 landed ahead of M4; M4 then completed the congestion/fabric picture.
+Remaining BTH extended headers not yet decoded: DETH (UD), RDETH
+(reliable datagram), AtomicETH (compare-and-swap / fetch-and-add) —
+tracked for a follow-up; ImmDt and RETH/AETH are done.
 
 ## MVP (M1) — the smallest vertical slice
 

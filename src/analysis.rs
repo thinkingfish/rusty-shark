@@ -1,24 +1,24 @@
-//! RoCE PSN analysis (milestone M5): per-queue-pair sequence tracking to
-//! surface the diagnostics RoCE debugging actually turns on — dropped
-//! packets, reordering/duplicates, and retransmissions.
+//! RoCE per-queue-pair analyses. Two reports, both keyed by (destination
+//! IP, destination QP) and both fed by one lightweight record collected
+//! per RoCE packet during the (already parallel) dissection walk:
 //!
-//! A reliable-connection (RC) queue pair carries a 24-bit Packet Sequence
-//! Number that increments by one per packet. Walking the PSN stream for a
-//! QP in arrival order tells us:
-//!   - a forward jump  → packets were dropped (a gap of `delta` PSNs);
-//!   - a backward step → a retransmit / out-of-order / duplicate.
+//! - **PSN analysis** (M5, `-z roce,psn`): reliable-connection sequence
+//!   tracking. An RC QP carries a 24-bit Packet Sequence Number that
+//!   increments by one per packet, so walking the stream in arrival order
+//!   reveals drops (a forward jump of `delta` PSNs), and retransmits /
+//!   out-of-order / duplicates (a backward step). RC only (BTH service
+//!   type 0) — PSN tracking is not meaningful for CNP/UC/UD.
 //!
-//! Why this fits the parallel design: a QP is identified by (destination
-//! IP, destination QP), and every QP's PSN space is independent. So the
-//! analysis shards perfectly — each QP is analysed with no reference to
-//! any other. Here we collect one lightweight record per RC packet during
-//! the (already parallel) dissection walk, then reduce per QP. Grouping is
-//! by an ordered map so output is deterministic; the per-QP reductions are
-//! embarrassingly parallelisable when captures get large.
+//! - **Congestion analysis** (M4, `-z roce,cong`): per-QP counts of ECN
+//!   CE-marked packets (congestion experienced) and CNPs (congestion
+//!   notified), exposing the DCQCN loop. This one counts every RoCE
+//!   packet, CNPs included.
 //!
-//! Scope: reliable-connection opcodes only (BTH service type 0). CNP,
-//! UC/UD, and non-RoCE packets are ignored — PSN tracking is only
-//! meaningful for RC.
+//! Why this fits the parallel design: every QP's state is independent, so
+//! the analyses shard perfectly — each QP is reduced with no reference to
+//! any other. Grouping is by an ordered map so output is deterministic;
+//! the per-QP reductions are embarrassingly parallelisable when captures
+//! get large.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -30,24 +30,38 @@ const PSN_MASK: u32 = 0x00ff_ffff;
 const PSN_HALF: u32 = 0x0080_0000;
 const PSN_SPACE: i64 = 0x0100_0000;
 
-/// One RC RoCE packet reduced to what PSN analysis needs.
+/// One RoCE packet reduced to what the analyses need.
 #[derive(Debug, Clone)]
 pub struct Rec {
     pub framenum: u64,
     pub dst: String,
     pub qp: u32,
     pub psn: u32,
+    /// BTH opcode (service type in bits 7..5, operation in 4..0).
+    pub opcode: u8,
+    /// Whether the packet's IP header carried the ECN CE codepoint (3).
+    pub ce: bool,
+}
+
+impl Rec {
+    /// A reliable-connection packet (BTH service type 0) — the only class
+    /// where PSN tracking is meaningful.
+    fn is_rc(&self) -> bool {
+        self.opcode >> 5 == 0
+    }
+
+    /// The RoCEv2 Congestion Notification Packet opcode.
+    fn is_cnp(&self) -> bool {
+        self.opcode == 0x81
+    }
 }
 
 /// Extract an analysis record from a dissected packet's field tree, or
-/// `None` if it isn't a reliable-connection RoCE packet.
+/// `None` if it isn't a RoCE (BTH) packet. All RoCE packets are captured
+/// here — the PSN analysis filters to reliable connections itself, while
+/// the congestion analysis needs CNPs too.
 pub fn record(framenum: u64, dst: &str, tree: &[Node]) -> Option<Rec> {
-    let opcode = as_uint(field::extract(tree, "infiniband.bth.opcode"))?;
-    // Reliable Connection is BTH service type 0 (opcode bits 7..5). CNP
-    // (0x81) and UC/UD fall outside this and are skipped.
-    if opcode >> 5 != 0 {
-        return None;
-    }
+    let opcode = as_uint(field::extract(tree, "infiniband.bth.opcode"))? as u8;
     let qp = as_uint(field::extract(tree, "infiniband.bth.destqp"))? as u32;
     let psn = as_uint(field::extract(tree, "infiniband.bth.psn"))? as u32;
     Some(Rec {
@@ -55,7 +69,15 @@ pub fn record(framenum: u64, dst: &str, tree: &[Node]) -> Option<Rec> {
         dst: dst.to_string(),
         qp,
         psn,
+        opcode,
+        ce: ce_marked(tree),
     })
+}
+
+/// True if the enclosing IP header (v4 or v6) carried the ECN CE mark.
+fn ce_marked(tree: &[Node]) -> bool {
+    matches!(as_uint(field::extract(tree, "ip.dsfield.ecn")), Some(3))
+        || matches!(as_uint(field::extract(tree, "ipv6.dsfield.ecn")), Some(3))
 }
 
 fn as_uint(v: Option<&Value>) -> Option<u64> {
@@ -142,13 +164,16 @@ pub struct Report {
     pub total_retransmits: u64,
 }
 
-/// Reduce the collected records into a per-QP report.
-pub fn analyze(records: &[Rec]) -> Report {
+/// Reduce the collected records into a per-QP PSN report (RC only).
+pub fn analyze_psn(records: &[Rec]) -> Report {
     // Key by (dst IP, dest QP): a QP endpoint lives on its destination
     // node, and each direction of a connection targets a distinct QP, so
     // this cleanly separates the two directions' PSN streams.
     let mut qps: BTreeMap<(String, u32), QpState> = BTreeMap::new();
     for r in records {
+        if !r.is_rc() {
+            continue; // PSN tracking only meaningful for reliable connections
+        }
         qps.entry((r.dst.clone(), r.qp))
             .or_default()
             .observe(r.psn, r.framenum);
@@ -231,16 +256,115 @@ impl fmt::Display for Report {
     }
 }
 
+// ---- congestion analysis ----
+
+#[derive(Default)]
+struct CongState {
+    packets: u64,
+    ce_marked: u64,
+    cnps: u64,
+}
+
+/// One row of the congestion report for a single queue pair.
+#[derive(Debug, Clone)]
+pub struct CongQp {
+    pub dst: String,
+    pub qp: u32,
+    pub packets: u64,
+    pub ce_marked: u64,
+    pub cnps: u64,
+}
+
+/// Per-QP congestion report.
+#[derive(Debug, Clone, Default)]
+pub struct CongReport {
+    pub rows: Vec<CongQp>,
+    pub total_packets: u64,
+    pub total_ce: u64,
+    pub total_cnps: u64,
+}
+
+/// Reduce records into a per-QP congestion view: how many packets
+/// destined to each QP were ECN CE-marked (congestion experienced), and
+/// how many CNPs it received (congestion notified). Together these show
+/// the DCQCN loop — CE marks upstream, CNPs coming back.
+pub fn analyze_cong(records: &[Rec]) -> CongReport {
+    let mut qps: BTreeMap<(String, u32), CongState> = BTreeMap::new();
+    for r in records {
+        let st = qps.entry((r.dst.clone(), r.qp)).or_default();
+        st.packets += 1;
+        if r.ce {
+            st.ce_marked += 1;
+        }
+        if r.is_cnp() {
+            st.cnps += 1;
+        }
+    }
+
+    let mut report = CongReport::default();
+    for ((dst, qp), st) in qps {
+        report.total_packets += st.packets;
+        report.total_ce += st.ce_marked;
+        report.total_cnps += st.cnps;
+        report.rows.push(CongQp {
+            dst,
+            qp,
+            packets: st.packets,
+            ce_marked: st.ce_marked,
+            cnps: st.cnps,
+        });
+    }
+    report
+}
+
+impl fmt::Display for CongReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "===================================================================")?;
+        writeln!(f, "RoCE congestion analysis (per destination QP)")?;
+        writeln!(f, "===================================================================")?;
+        if self.rows.is_empty() {
+            writeln!(f, "No RoCE packets found.")?;
+            return Ok(());
+        }
+        writeln!(
+            f,
+            "{:<18} {:>10} {:>8} {:>10} {:>6}",
+            "Dst IP", "QP", "Packets", "CE-marked", "CNPs"
+        )?;
+        writeln!(f, "-----------------------------------------------------------")?;
+        for r in &self.rows {
+            writeln!(
+                f,
+                "{:<18} {:>#10x} {:>8} {:>10} {:>6}",
+                r.dst, r.qp, r.packets, r.ce_marked, r.cnps
+            )?;
+        }
+        writeln!(f, "-----------------------------------------------------------")?;
+        writeln!(
+            f,
+            "Totals: QPs={} Packets={} CE-marked={} CNPs={}",
+            self.rows.len(),
+            self.total_packets,
+            self.total_ce,
+            self.total_cnps
+        )?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn rec(framenum: u64, dst: &str, qp: u32, psn: u32) -> Rec {
+        // RC RDMA WRITE Only (0x0a), not CE-marked — the default for PSN tests.
         Rec {
             framenum,
             dst: dst.into(),
             qp,
             psn,
+            opcode: 0x0a,
+            ce: false,
         }
     }
 
@@ -251,7 +375,7 @@ mod tests {
             rec(2, "10.0.0.2", 0x123, 101),
             rec(3, "10.0.0.2", 0x123, 102),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         assert_eq!(rep.rows.len(), 1);
         let r = &rep.rows[0];
         assert_eq!(r.packets, 3);
@@ -271,7 +395,7 @@ mod tests {
             rec(3, "10.0.0.2", 0x123, 103),
             rec(4, "10.0.0.2", 0x123, 102),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         let r = &rep.rows[0];
         assert_eq!(r.packets, 4);
         assert_eq!(r.gap_events, 1);
@@ -287,7 +411,7 @@ mod tests {
             rec(1, "10.0.0.2", 0x123, 5),
             rec(2, "10.0.0.2", 0x123, 5),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         assert_eq!(rep.rows[0].retransmits, 1);
     }
 
@@ -298,7 +422,7 @@ mod tests {
             rec(1, "10.0.0.2", 0x1, 10),
             rec(2, "10.0.0.2", 0x1, 15),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         assert_eq!(rep.rows[0].gap_events, 1);
         assert_eq!(rep.rows[0].missing, 4);
     }
@@ -311,7 +435,7 @@ mod tests {
             rec(3, "10.0.0.2", 0x1, 0x0000_0000),
             rec(4, "10.0.0.2", 0x1, 0x0000_0001),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         assert_eq!(rep.rows[0].gap_events, 0);
         assert_eq!(rep.rows[0].missing, 0);
         assert_eq!(rep.rows[0].retransmits, 0);
@@ -324,7 +448,7 @@ mod tests {
             rec(2, "10.0.0.3", 0x123, 200), // same QP number, different host
             rec(3, "10.0.0.2", 0x456, 5),
         ];
-        let rep = analyze(&recs);
+        let rep = analyze_psn(&recs);
         assert_eq!(rep.rows.len(), 3);
         assert_eq!(rep.total_packets, 3);
     }
@@ -335,5 +459,58 @@ mod tests {
         assert_eq!(seq_diff(100, 101), -1);
         assert_eq!(seq_diff(0x000000, 0x00ffffff), 1); // wrap forward
         assert_eq!(seq_diff(0x00ffffff, 0x000000), -1); // wrap backward
+    }
+
+    fn cong_rec(dst: &str, qp: u32, opcode: u8, ce: bool) -> Rec {
+        Rec {
+            framenum: 0,
+            dst: dst.into(),
+            qp,
+            psn: 0,
+            opcode,
+            ce,
+        }
+    }
+
+    #[test]
+    fn congestion_counts_ce_and_cnp() {
+        let recs = vec![
+            // QP 0x123 on 10.0.0.2: two data packets, one CE-marked.
+            cong_rec("10.0.0.2", 0x123, 0x0a, false),
+            cong_rec("10.0.0.2", 0x123, 0x0a, true),
+            // QP 0x456 on 10.0.0.1: a CNP (opcode 0x81).
+            cong_rec("10.0.0.1", 0x456, 0x81, false),
+        ];
+        let rep = analyze_cong(&recs);
+        assert_eq!(rep.rows.len(), 2);
+        assert_eq!(rep.total_packets, 3);
+        assert_eq!(rep.total_ce, 1);
+        assert_eq!(rep.total_cnps, 1);
+
+        let q123 = rep.rows.iter().find(|r| r.qp == 0x123).unwrap();
+        assert_eq!(q123.packets, 2);
+        assert_eq!(q123.ce_marked, 1);
+        assert_eq!(q123.cnps, 0);
+
+        let q456 = rep.rows.iter().find(|r| r.qp == 0x456).unwrap();
+        assert_eq!(q456.cnps, 1);
+    }
+
+    #[test]
+    fn psn_analysis_ignores_cnp_but_congestion_counts_it() {
+        // A CNP shares a QP with RC data; PSN analysis must skip it.
+        let recs = vec![
+            rec(1, "10.0.0.2", 0x123, 100),         // RC (opcode 0x0a via helper)
+            cong_rec("10.0.0.2", 0x123, 0x81, false), // CNP, not RC
+            rec(2, "10.0.0.2", 0x123, 101),
+        ];
+        let psn = analyze_psn(&recs);
+        assert_eq!(psn.rows.len(), 1);
+        assert_eq!(psn.rows[0].packets, 2); // CNP excluded
+        assert_eq!(psn.rows[0].gap_events, 0);
+
+        let cong = analyze_cong(&recs);
+        assert_eq!(cong.total_packets, 3); // CNP included
+        assert_eq!(cong.total_cnps, 1);
     }
 }

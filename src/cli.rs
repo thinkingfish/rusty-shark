@@ -53,9 +53,10 @@ pub struct Args {
     pub display_filter: Option<String>,
 
     /// Collect a statistics report (like tshark -z), printed after the
-    /// packet listing. Currently supported: `roce,psn` — per-queue-pair
-    /// RoCE PSN analysis (drops, reordering, retransmits). Analysis
-    /// covers all packets read, independent of any -Y display filter.
+    /// packet listing. Supported specs:
+    ///   `roce,psn`  — per-QP PSN analysis (drops, reordering, retransmits);
+    ///   `roce,cong` — per-QP congestion (ECN CE-marked packets and CNPs).
+    /// Analysis covers all packets read, independent of any -Y filter.
     #[arg(short = 'z', long = "statistics", value_name = "SPEC")]
     pub statistics: Option<String>,
 }
