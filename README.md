@@ -32,15 +32,20 @@ capture order.
   Dest QP, PSN, RETH/AETH extended headers, CNP, and ECN/FECN/BECN
   congestion flags. See `docs/tshark-analysis/datacenter-roadmap.md`.
 - Parallel dissection (`rayon`), reader-batched for bounded memory.
-- `-c N`, `-q`, `-j N`, `--no-parallel`, `--batch N` CLI flags.
+- **Protocol detail tree** with typed, named fields behind every
+  dissector: `-V` prints the full tree (tshark-style), `-e <field>`
+  extracts named field values (tab-separated, repeatable) — e.g.
+  `-e infiniband.bth.psn -e infiniband.bth.destqp` to pipe RDMA
+  sequence numbers into analysis.
+- `-c N`, `-q`, `-j N`, `-V`, `-e`, `--no-parallel`, `--batch N` flags.
 
 ## Not implemented
 
 - Live capture (no libpcap / dumpcap equivalent yet).
-- Display / read filters (`-Y`, `-R`).
+- Display / read filters (`-Y`, `-R`). (The typed field tree that backs
+  them now exists; the filter engine is the next milestone.)
 - Two-pass analysis (`-2`).
-- Verbose protocol tree (`-V`), hex dump (`-x`), PDML / PSML / JSON / EK
-  output.
+- Hex dump (`-x`), PDML / PSML / JSON / EK output.
 - Stateful protocols that need reassembly, defragmentation, or conversation
   tracking (TLS, HTTP/2, stream-following, ...).
 - Name resolution, color output, taps, statistics, PDU export.
@@ -61,7 +66,8 @@ capture order.
     src/pcapng.rs     — pcapng reader (SHB / IDB / EPB / SPB)
     src/dissect.rs    — per-packet stateless dissectors
     src/roce.rs       — RoCEv2 / InfiniBand BTH dissection
-    src/print.rs      — column-summary formatting
+    src/field.rs      — typed field tree (-V / -e), the filter foundation
+    src/print.rs      — summary, verbose, and field-extraction formatting
     src/pipeline.rs   — reader → parallel dissect → ordered print
 
 ## License
