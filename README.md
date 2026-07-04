@@ -44,7 +44,14 @@ capture order.
   `-Y 'infiniband.bth.destqp == 0x123'`,
   `-Y 'ip.dsfield.ecn == 3'` (ECN-marked),
   `-Y 'infiniband.bth.opcode == 0x11 || infiniband.bth.opcode == 0x81'`.
-- `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `--no-parallel`, `--batch N`.
+- **RoCE PSN analysis** (`-z roce,psn`): per-queue-pair sequence
+  tracking that reports dropped packets, reordering/duplicates, and
+  retransmits, with the frame where each QP's first anomaly appears.
+  Keyed by (destination IP, destination QP); 24-bit PSN wrap handled;
+  covers all packets read, independent of any `-Y` filter. This is the
+  QP-shardable analysis the parallel design was built for.
+- `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `-z`, `--no-parallel`,
+  `--batch N`.
 
 ## Not implemented
 
@@ -53,8 +60,9 @@ capture order.
   display filtering with `-Y` is supported.)
 - Hex dump (`-x`), PDML / PSML / JSON / EK output.
 - Stateful protocols that need reassembly, defragmentation, or conversation
-  tracking (TLS, HTTP/2, stream-following, ...).
-- Name resolution, color output, taps, statistics, PDU export.
+  tracking (TLS, HTTP/2, stream-following, ...). (RoCE PSN analysis via
+  `-z roce,psn` is the one stateful analysis implemented so far.)
+- Name resolution, color output, general tap framework, PDU export.
 
 ## Build & run
 
@@ -74,6 +82,7 @@ capture order.
     src/roce.rs       — RoCEv2 / InfiniBand BTH dissection
     src/field.rs      — typed field tree (-V / -e), the filter foundation
     src/dfilter.rs    — display-filter lexer / parser / evaluator (-Y)
+    src/analysis.rs   — per-QP RoCE PSN analysis (-z roce,psn)
     src/print.rs      — summary, verbose, and field-extraction formatting
     src/pipeline.rs   — reader → parallel dissect → filter → ordered print
 

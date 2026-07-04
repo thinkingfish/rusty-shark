@@ -1,3 +1,4 @@
+mod analysis;
 mod cli;
 mod dfilter;
 mod dissect;

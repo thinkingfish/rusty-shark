@@ -51,6 +51,13 @@ pub struct Args {
     /// `-Y 'infiniband.bth.destqp == 0x123 && ip.dsfield.ecn == 3'`.
     #[arg(short = 'Y', long = "display-filter", value_name = "FILTER")]
     pub display_filter: Option<String>,
+
+    /// Collect a statistics report (like tshark -z), printed after the
+    /// packet listing. Currently supported: `roce,psn` — per-queue-pair
+    /// RoCE PSN analysis (drops, reordering, retransmits). Analysis
+    /// covers all packets read, independent of any -Y display filter.
+    #[arg(short = 'z', long = "statistics", value_name = "SPEC")]
+    pub statistics: Option<String>,
 }
 
 /// How each packet should be rendered, derived from the flags above.

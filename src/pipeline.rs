@@ -1,10 +1,9 @@
 use std::io::{BufWriter, Write};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 
-use anyhow::anyhow;
-
+use crate::analysis::{self, Rec};
 use crate::cli::{Args, OutputMode};
 use crate::dfilter::Filter;
 use crate::dissect::{self, Dissection};
@@ -30,6 +29,15 @@ pub fn run(args: &Args) -> Result<()> {
         None => None,
     };
 
+    // Which statistics report, if any, to accumulate.
+    let analyze = match args.statistics.as_deref() {
+        None => false,
+        Some("roce,psn") | Some("roce-psn") | Some("rdma,psn") => true,
+        Some(other) => bail!(
+            "unknown -z statistics spec {other:?}; supported: roce,psn"
+        ),
+    };
+
     let mut reader = CaptureReader::open(&args.read_file)?;
 
     let stdout = std::io::stdout();
@@ -41,6 +49,8 @@ pub fn run(args: &Args) -> Result<()> {
     let batch_cap = args.batch.max(1);
 
     let mut batch: Vec<(FrameMeta, RawPacket)> = Vec::with_capacity(batch_cap);
+    // PSN-analysis records, accumulated in capture order across batches.
+    let mut records: Vec<Rec> = Vec::new();
 
     while frame_number < max {
         let take_now = batch_cap.min((max - frame_number) as usize);
@@ -49,7 +59,11 @@ pub fn run(args: &Args) -> Result<()> {
             break;
         }
 
-        flush_batch(&mut out, &mut batch, args, filter.as_ref())?;
+        flush_batch(&mut out, &mut batch, args, filter.as_ref(), analyze, &mut records)?;
+    }
+
+    if analyze {
+        write!(out, "{}", analysis::analyze(&records))?;
     }
 
     out.flush()?;
@@ -84,6 +98,8 @@ fn flush_batch<W: Write>(
     batch: &mut Vec<(FrameMeta, RawPacket)>,
     args: &Args,
     filter: Option<&Filter>,
+    analyze: bool,
+    records: &mut Vec<Rec>,
 ) -> Result<()> {
     // Dissect. Parallelism here is safe because `dissect::dissect` is pure
     // over a single packet. The batch is an owned `Vec`, so `par_iter` hands
@@ -97,8 +113,8 @@ fn flush_batch<W: Write>(
             .collect()
     };
 
-    // Print in original order. `results` is index-aligned with `batch`.
-    if args.quiet && filter.is_none() {
+    // Fast path: nothing to print and no analysis to accumulate.
+    if args.quiet && !analyze {
         batch.clear();
         return Ok(());
     }
@@ -107,6 +123,18 @@ fn flush_batch<W: Write>(
     for (i, d) in results.into_iter().enumerate() {
         let (meta, pkt) = &batch[i];
         let Dissection { summary, tree } = d;
+
+        // Analysis sees every packet read, independent of the display
+        // filter, so drops aren't hidden by a narrowing -Y.
+        if analyze {
+            if let Some(r) = analysis::record(meta.number, &summary.dst, &tree) {
+                records.push(r);
+            }
+        }
+
+        if args.quiet {
+            continue;
+        }
 
         // The searchable node set is needed when filtering, in verbose or
         // field mode, and includes a synthesised Frame node so that
@@ -120,9 +148,6 @@ fn flush_batch<W: Write>(
                 if !f.matches(&nodes) {
                     continue;
                 }
-            }
-            if args.quiet {
-                continue;
             }
             match mode {
                 OutputMode::Summary => writeln!(out, "{}", format_line(*meta, &summary))?,
