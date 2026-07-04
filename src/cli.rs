@@ -43,6 +43,14 @@ pub struct Args {
     /// `-e infiniband.bth.psn -e infiniband.bth.destqp`.
     #[arg(short = 'e', long = "field", value_name = "FIELD")]
     pub fields: Vec<String>,
+
+    /// Display filter (like tshark -Y): only packets matching the
+    /// expression are printed. Supports ==, !=, <, <=, >, >= (and the
+    /// eq/ne/lt/le/gt/ge aliases), &&/||/! (and/or/not), parentheses,
+    /// and bare field/protocol existence tests. Example:
+    /// `-Y 'infiniband.bth.destqp == 0x123 && ip.dsfield.ecn == 3'`.
+    #[arg(short = 'Y', long = "display-filter", value_name = "FILTER")]
+    pub display_filter: Option<String>,
 }
 
 /// How each packet should be rendered, derived from the flags above.

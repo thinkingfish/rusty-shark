@@ -1,4 +1,5 @@
 mod cli;
+mod dfilter;
 mod dissect;
 mod field;
 mod pcap;

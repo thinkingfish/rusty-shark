@@ -116,6 +116,45 @@ fn extract_node<'a>(n: &'a Node, abbrev: &str) -> Option<&'a Value> {
     None
 }
 
+/// Collect every value in the tree whose abbreviation matches `abbrev`.
+/// A field can occur more than once (e.g. repeated addresses); a display
+/// filter comparison matches if *any* occurrence satisfies it, so the
+/// evaluator needs them all.
+pub fn collect<'a>(tree: &'a [Node], abbrev: &str) -> Vec<&'a Value> {
+    let mut out = Vec::new();
+    for n in tree {
+        collect_node(n, abbrev, &mut out);
+    }
+    out
+}
+
+fn collect_node<'a>(n: &'a Node, abbrev: &str, out: &mut Vec<&'a Value>) {
+    if n.abbrev == Some(abbrev) {
+        out.push(&n.value);
+    }
+    for c in &n.children {
+        collect_node(c, abbrev, out);
+    }
+}
+
+/// True if a field or protocol named `name` is present. Matches the exact
+/// abbreviation (`ip.src`) or any child path under it (`infiniband.bth`
+/// matches when `infiniband.bth.opcode` exists), giving protocol-existence
+/// semantics like tshark's bare `ip` / `tcp` tests.
+pub fn present(tree: &[Node], name: &str) -> bool {
+    fn rec(n: &Node, name: &str) -> bool {
+        if let Some(a) = n.abbrev {
+            if a == name
+                || (a.starts_with(name) && a.as_bytes().get(name.len()) == Some(&b'.'))
+            {
+                return true;
+            }
+        }
+        n.children.iter().any(|c| rec(c, name))
+    }
+    tree.iter().any(|n| rec(n, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
