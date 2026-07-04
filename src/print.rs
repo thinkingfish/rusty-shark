@@ -1,6 +1,7 @@
 use std::fmt::Write;
 
 use crate::dissect::Summary;
+use crate::field::{self, Node, Value};
 
 /// Per-frame metadata computed cheaply on the reader thread: frame number
 /// (1-based) and time relative to the first frame.
@@ -24,6 +25,52 @@ pub fn format_line(meta: FrameMeta, s: &Summary) -> String {
         len = s.length,
         info = s.info,
     );
+    out
+}
+
+/// Build the "Frame" pseudo-protocol node shown at the top of `-V`
+/// output. It carries capture metadata (number, time, length) that isn't
+/// part of any on-wire protocol but is addressable as `frame.*` fields.
+pub fn frame_node(meta: FrameMeta, orig_len: u32, cap_len: usize) -> Node {
+    let mut n = Node::proto(format!(
+        "Frame {}: {} bytes on wire ({} bits), {} bytes captured ({} bits)",
+        meta.number,
+        orig_len,
+        orig_len as u64 * 8,
+        cap_len,
+        cap_len as u64 * 8
+    ));
+    n.add(
+        "frame.number",
+        Value::Uint(meta.number),
+        format!("Frame Number: {}", meta.number),
+    );
+    n.add(
+        "frame.len",
+        Value::Uint(orig_len as u64),
+        format!("Frame Length: {orig_len} bytes"),
+    );
+    n.add(
+        "frame.time_relative",
+        Value::Str(format!("{:.6}", meta.rel_time_sec)),
+        format!("Time since reference: {:.6} seconds", meta.rel_time_sec),
+    );
+    n
+}
+
+/// Render the tab-separated field values for `-e` output: for each
+/// requested field, the first matching value in `tree`, or empty if
+/// absent (matching tshark's behaviour).
+pub fn format_fields(tree: &[Node], fields: &[String]) -> String {
+    let mut out = String::new();
+    for (i, f) in fields.iter().enumerate() {
+        if i != 0 {
+            out.push('\t');
+        }
+        if let Some(v) = field::extract(tree, f) {
+            let _ = write!(&mut out, "{v}");
+        }
+    }
     out
 }
 

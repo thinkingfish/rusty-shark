@@ -20,7 +20,8 @@
 
 use std::fmt::Write;
 
-use crate::dissect::Summary;
+use crate::dissect::Dissection;
+use crate::field::{Node, Value};
 
 /// The well-known UDP destination port for RoCEv2.
 pub const ROCE_V2_UDP_PORT: u16 = 4791;
@@ -28,13 +29,14 @@ pub const ROCE_V2_UDP_PORT: u16 = 4791;
 /// InfiniBand Base Transport Header length, in bytes.
 const BTH_LEN: usize = 12;
 
-/// Decode a RoCEv2 payload (the bytes following the UDP header). `s` has
-/// already been populated with the IP src/dst; we overwrite the protocol
-/// and info columns.
-pub fn dissect(payload: &[u8], s: &mut Summary) {
-    s.protocol = "RoCE";
+/// Decode a RoCEv2 payload (the bytes following the UDP header). The IP
+/// src/dst columns are already populated; we overwrite the protocol and
+/// info columns and append a BTH protocol node to the detail tree.
+pub fn dissect(payload: &[u8], d: &mut Dissection) {
+    d.summary.protocol = "RoCE";
     if payload.len() < BTH_LEN {
-        s.info = "truncated BTH".into();
+        d.summary.info = "truncated BTH".into();
+        d.tree.push(Node::proto("InfiniBand Base Transport Header (truncated)"));
         return;
     }
 
@@ -43,7 +45,7 @@ pub fn dissect(payload: &[u8], s: &mut Summary) {
     let migreq = payload[1] & 0x40 != 0;
     let pad_count = (payload[1] >> 4) & 0x03;
     let _tver = payload[1] & 0x0f;
-    let _p_key = u16::from_be_bytes([payload[2], payload[3]]);
+    let p_key = u16::from_be_bytes([payload[2], payload[3]]);
     let fecn = payload[4] & 0x80 != 0;
     let becn = payload[4] & 0x40 != 0;
     let dest_qp = u24_be(&payload[5..8]);
@@ -55,12 +57,54 @@ pub fn dissect(payload: &[u8], s: &mut Summary) {
     let mut info = String::with_capacity(64);
     let _ = write!(&mut info, "{name} DQP=0x{dest_qp:06x} PSN={psn}");
 
+    let mut node = Node::proto(format!("InfiniBand BTH — {name}"));
+    node.add(
+        "infiniband.bth.opcode",
+        Value::Uint(opcode as u64),
+        format!("Opcode: {name} (0x{opcode:02x})"),
+    );
+    node.add(
+        "infiniband.bth.pkey",
+        Value::Uint(p_key as u64),
+        format!("Partition Key: 0x{p_key:04x}"),
+    );
+    node.add(
+        "infiniband.bth.destqp",
+        Value::Uint(dest_qp as u64),
+        format!("Destination Queue Pair: 0x{dest_qp:06x}"),
+    );
+    node.add(
+        "infiniband.bth.psn",
+        Value::Uint(psn as u64),
+        format!("Packet Sequence Number: {psn}"),
+    );
+    node.add(
+        "infiniband.bth.se",
+        Value::Uint(se as u64),
+        format!("Solicited Event: {}", se as u8),
+    );
+    node.add(
+        "infiniband.bth.ackreq",
+        Value::Uint(ack_req as u64),
+        format!("Acknowledge Request: {}", ack_req as u8),
+    );
+    node.add(
+        "infiniband.bth.fecn",
+        Value::Uint(fecn as u64),
+        format!("FECN: {}", fecn as u8),
+    );
+    node.add(
+        "infiniband.bth.becn",
+        Value::Uint(becn as u64),
+        format!("BECN: {}", becn as u8),
+    );
+
     // Opcode-driven dispatch to the following extended transport header.
     // This is the core BTH pattern: the operation determines what comes next.
     let ext = &payload[BTH_LEN..];
     match ext_header_for(opcode) {
-        ExtHeader::Reth => append_reth(ext, &mut info),
-        ExtHeader::Aeth => append_aeth(ext, &mut info),
+        ExtHeader::Reth => append_reth(ext, &mut info, &mut node),
+        ExtHeader::Aeth => append_aeth(ext, &mut info, &mut node),
         ExtHeader::None => {}
     }
 
@@ -81,14 +125,13 @@ pub fn dissect(payload: &[u8], s: &mut Summary) {
     if migreq {
         flags.push("MigReq");
     }
-    if pad_count != 0 {
-        // Not a flag, but worth noting when non-zero.
-    }
+    let _ = pad_count; // decoded for completeness; not surfaced in summary
     if !flags.is_empty() {
         let _ = write!(&mut info, " [{}]", flags.join(", "));
     }
 
-    s.info = info;
+    d.summary.info = info;
+    d.tree.push(node);
 }
 
 /// Which extended header, if any, immediately follows the BTH for a given
@@ -117,7 +160,7 @@ fn ext_header_for(opcode: u8) -> ExtHeader {
 }
 
 /// RDMA Extended Transport Header: virtual address, remote key, DMA length.
-fn append_reth(ext: &[u8], info: &mut String) {
+fn append_reth(ext: &[u8], info: &mut String, node: &mut Node) {
     if ext.len() < 16 {
         info.push_str(" RETH=<truncated>");
         return;
@@ -129,10 +172,25 @@ fn append_reth(ext: &[u8], info: &mut String) {
         info,
         " VA=0x{va:016x} RKey=0x{r_key:08x} Len={dma_len}"
     );
+    node.add(
+        "infiniband.reth.va",
+        Value::Uint(va),
+        format!("Virtual Address: 0x{va:016x}"),
+    );
+    node.add(
+        "infiniband.reth.rkey",
+        Value::Uint(r_key as u64),
+        format!("Remote Key: 0x{r_key:08x}"),
+    );
+    node.add(
+        "infiniband.reth.dmalen",
+        Value::Uint(dma_len as u64),
+        format!("DMA Length: {dma_len}"),
+    );
 }
 
 /// ACK Extended Transport Header: syndrome + message sequence number.
-fn append_aeth(ext: &[u8], info: &mut String) {
+fn append_aeth(ext: &[u8], info: &mut String, node: &mut Node) {
     if ext.len() < 4 {
         info.push_str(" AETH=<truncated>");
         return;
@@ -145,6 +203,16 @@ fn append_aeth(ext: &[u8], info: &mut String) {
         0b011 => "NAK",
         _ => "reserved",
     };
+    node.add(
+        "infiniband.aeth.syndrome",
+        Value::Uint(syndrome as u64),
+        format!("Syndrome: 0x{syndrome:02x} ({kind})"),
+    );
+    node.add(
+        "infiniband.aeth.msn",
+        Value::Uint(msn as u64),
+        format!("Message Sequence Number: {msn}"),
+    );
     let _ = write!(info, " {kind} Syndrome=0x{syndrome:02x} MSN={msn}");
 }
 
@@ -201,16 +269,21 @@ fn u24_be(b: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dissect::Summary;
+    use crate::field::extract;
 
-    fn summary() -> Summary {
-        // Length is irrelevant to these tests; build a bare Summary via the
-        // public dissect entry using a crafted BTH.
-        Summary {
-            src: "10.0.0.1".into(),
-            dst: "10.0.0.2".into(),
-            protocol: "UDP",
-            info: String::new(),
-            length: 0,
+    fn dis() -> Dissection {
+        // Bare dissection with IP columns already filled, as the UDP
+        // dissector would leave it before handing off to RoCE.
+        Dissection {
+            summary: Summary {
+                src: "10.0.0.1".into(),
+                dst: "10.0.0.2".into(),
+                protocol: "UDP",
+                info: String::new(),
+                length: 0,
+            },
+            tree: Vec::new(),
         }
     }
 
@@ -238,13 +311,18 @@ mod tests {
     fn send_only_rc() {
         // RC SEND Only (0x04), DQP 0xd2, PSN 1, AckReq set (byte8 0x80).
         let payload = bth(0x04, 0x0000d2, 1, 0x00, 0x00, 0x80);
-        let mut s = summary();
-        dissect(&payload, &mut s);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        let s = &d.summary;
         assert_eq!(s.protocol, "RoCE");
         assert!(s.info.contains("RC SEND Only"), "{}", s.info);
         assert!(s.info.contains("DQP=0x0000d2"), "{}", s.info);
         assert!(s.info.contains("PSN=1"), "{}", s.info);
         assert!(s.info.contains("AckReq"), "{}", s.info);
+        // The same values are addressable as typed fields.
+        assert_eq!(extract(&d.tree, "infiniband.bth.destqp"), Some(&Value::Uint(0xd2)));
+        assert_eq!(extract(&d.tree, "infiniband.bth.psn"), Some(&Value::Uint(1)));
+        assert_eq!(extract(&d.tree, "infiniband.bth.opcode"), Some(&Value::Uint(0x04)));
     }
 
     #[test]
@@ -254,12 +332,18 @@ mod tests {
         payload.extend_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes()); // VA
         payload.extend_from_slice(&0xdead_beefu32.to_be_bytes()); // RKey
         payload.extend_from_slice(&4096u32.to_be_bytes()); // DMA length
-        let mut s = summary();
-        dissect(&payload, &mut s);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        let s = &d.summary;
         assert!(s.info.contains("RDMA WRITE Only"), "{}", s.info);
         assert!(s.info.contains("VA=0x1122334455667788"), "{}", s.info);
         assert!(s.info.contains("RKey=0xdeadbeef"), "{}", s.info);
         assert!(s.info.contains("Len=4096"), "{}", s.info);
+        assert_eq!(extract(&d.tree, "infiniband.reth.dmalen"), Some(&Value::Uint(4096)));
+        assert_eq!(
+            extract(&d.tree, "infiniband.reth.rkey"),
+            Some(&Value::Uint(0xdead_beef))
+        );
     }
 
     #[test]
@@ -268,37 +352,41 @@ mod tests {
         let mut payload = bth(0x11, 0x000001, 100, 0x00, 0x00, 0x00);
         payload.push(0x00); // syndrome: ACK
         payload.extend_from_slice(&[0x00, 0x00, 0x07]); // MSN = 7
-        let mut s = summary();
-        dissect(&payload, &mut s);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        let s = &d.summary;
         assert!(s.info.contains("Acknowledge"), "{}", s.info);
         assert!(s.info.contains("ACK"), "{}", s.info);
         assert!(s.info.contains("MSN=7"), "{}", s.info);
+        assert_eq!(extract(&d.tree, "infiniband.aeth.msn"), Some(&Value::Uint(7)));
     }
 
     #[test]
     fn cnp_congestion_packet() {
         let payload = bth(0x81, 0x000abc, 0, 0x00, 0x00, 0x00);
-        let mut s = summary();
-        dissect(&payload, &mut s);
-        assert!(s.info.contains("CNP"), "{}", s.info);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        assert!(d.summary.info.contains("CNP"), "{}", d.summary.info);
     }
 
     #[test]
     fn congestion_flags_surfaced() {
         // FECN + BECN set in byte 4.
         let payload = bth(0x04, 0x000001, 5, 0x00, 0xc0, 0x00);
-        let mut s = summary();
-        dissect(&payload, &mut s);
-        assert!(s.info.contains("FECN"), "{}", s.info);
-        assert!(s.info.contains("BECN"), "{}", s.info);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        assert!(d.summary.info.contains("FECN"), "{}", d.summary.info);
+        assert!(d.summary.info.contains("BECN"), "{}", d.summary.info);
+        assert_eq!(extract(&d.tree, "infiniband.bth.fecn"), Some(&Value::Uint(1)));
+        assert_eq!(extract(&d.tree, "infiniband.bth.becn"), Some(&Value::Uint(1)));
     }
 
     #[test]
     fn truncated_bth() {
         let payload = vec![0u8; 8];
-        let mut s = summary();
-        dissect(&payload, &mut s);
-        assert_eq!(s.protocol, "RoCE");
-        assert!(s.info.contains("truncated"), "{}", s.info);
+        let mut d = dis();
+        dissect(&payload, &mut d);
+        assert_eq!(d.summary.protocol, "RoCE");
+        assert!(d.summary.info.contains("truncated"), "{}", d.summary.info);
     }
 }

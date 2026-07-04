@@ -74,22 +74,24 @@ general tshark becomes embarrassingly parallel here.
 Two pieces from the general roadmap still gate the interesting work,
 but scoped to this domain:
 
-1. **Field-tree dissection model.** BTH alone has ~10 named fields;
-   extended headers add more. Typed, named fields are what make
-   `bth.opcode == RDMA_WRITE_ONLY`, `bth.dqp == 0x123`, and PSN
-   analysis possible. Today dissectors emit a flat `Summary`; that is
-   the next refactor after the MVP.
-2. **Display filters (`-Y`).** Enormously valuable here
-   (`bth.psn`, `bth.dqp`, `ip.ecn == 3`, `roce.cnp`). Builds on the
-   field tree.
+1. **Field-tree dissection model.** *(Done, M2.)* BTH alone has ~10
+   named fields; extended headers add more. Typed, named fields are
+   what make `bth.opcode == RDMA_WRITE_ONLY`, `bth.dqp == 0x123`, and
+   PSN analysis possible. Every dissector now builds a `Vec<Node>` of
+   typed fields alongside the summary columns (`src/field.rs`),
+   consumed by `-V` and `-e`.
+2. **Display filters (`-Y`).** *(Next, M3.)* Enormously valuable here
+   (`infiniband.bth.psn`, `infiniband.bth.destqp`, `ip.dsfield.ecn`).
+   Builds directly on the field tree: the filter engine evaluates
+   expressions against node abbreviations and typed values.
 
 ## Milestones
 
 | ID | Milestone | Delivers |
 |----|-----------|----------|
-| **M1** | **RoCEv2 BTH summary slice (MVP — DONE in this PR)** | Detect UDP/4791, decode BTH opcode + Dest QP + PSN, dispatch to RETH/AETH, surface CNP and ECN/FECN/BECN flags, in the existing summary line |
-| M2 | Field-tree model + `-V` | Typed named fields (`infiniband.bth.*`); verbose per-field output |
-| M3 | Display filters over BTH fields | `-Y 'bth.dqp == 0x123 && bth.opcode == 0x0a'` |
+| **M1** | RoCEv2 BTH summary slice (MVP — DONE) | Detect UDP/4791, decode BTH opcode + Dest QP + PSN, dispatch to RETH/AETH, surface CNP and ECN/FECN/BECN flags, in the existing summary line |
+| **M2** | **Field-tree model + `-V` + `-e` (DONE in this PR)** | Typed named fields (`infiniband.bth.*`, `ip.*`, `tcp.*`, ...) on every dissector; `-V` verbose tree; `-e <field>` extraction |
+| M3 | Display filters over the field tree | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'` |
 | M4 | Congestion + fabric tier | ECN surfacing, CNP correlation, PFC pause frames, remaining ext headers |
 | M5 | QP-sharded, PSN-aware analysis pass | Per-QP drop/reorder/retransmit detection; the parallel design realized |
 | M6 | RDMA ULPs | NVMe-oF/RDMA first, then iSER / SMB Direct / IPoIB |

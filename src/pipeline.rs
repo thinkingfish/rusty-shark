@@ -3,10 +3,11 @@ use std::io::{BufWriter, Write};
 use anyhow::Result;
 use rayon::prelude::*;
 
-use crate::cli::Args;
-use crate::dissect::{self, Summary};
+use crate::cli::{Args, OutputMode};
+use crate::dissect::{self, Dissection};
+use crate::field;
 use crate::pcap::{CaptureReader, RawPacket};
-use crate::print::{FrameMeta, column, format_line};
+use crate::print::{FrameMeta, column, format_fields, format_line, frame_node};
 
 pub fn run(args: &Args) -> Result<()> {
     if args.jobs > 0 {
@@ -74,7 +75,7 @@ fn flush_batch<W: Write>(
     // Dissect. Parallelism here is safe because `dissect::dissect` is pure
     // over a single packet. The batch is an owned `Vec`, so `par_iter` hands
     // each worker a slice of it with no aliasing.
-    let summaries: Vec<Summary> = if args.no_parallel {
+    let results: Vec<Dissection> = if args.no_parallel {
         batch.iter().map(|(_, p)| dissect::dissect(p)).collect()
     } else {
         batch
@@ -83,11 +84,34 @@ fn flush_batch<W: Write>(
             .collect()
     };
 
-    // Print in original order. `summaries` is index-aligned with `batch`.
-    if !args.quiet {
-        for (i, s) in summaries.iter().enumerate() {
-            let (meta, _) = &batch[i];
-            writeln!(out, "{}", format_line(*meta, s))?;
+    // Print in original order. `results` is index-aligned with `batch`.
+    if args.quiet {
+        batch.clear();
+        return Ok(());
+    }
+
+    let mode = args.output_mode();
+    for (i, d) in results.into_iter().enumerate() {
+        let (meta, pkt) = &batch[i];
+        match mode {
+            OutputMode::Summary => {
+                writeln!(out, "{}", format_line(*meta, &d.summary))?;
+            }
+            OutputMode::Verbose => {
+                // Frame pseudo-protocol node, then each dissected layer.
+                let mut nodes = Vec::with_capacity(d.tree.len() + 1);
+                nodes.push(frame_node(*meta, pkt.orig_len, pkt.data.len()));
+                nodes.extend(d.tree);
+                field::write_verbose(out, &nodes)?;
+                writeln!(out)?; // blank line between packets
+            }
+            OutputMode::Fields => {
+                // Frame fields are addressable too (frame.number, ...).
+                let mut nodes = Vec::with_capacity(d.tree.len() + 1);
+                nodes.push(frame_node(*meta, pkt.orig_len, pkt.data.len()));
+                nodes.extend(d.tree);
+                writeln!(out, "{}", format_fields(&nodes, &args.fields))?;
+            }
         }
     }
     batch.clear();
