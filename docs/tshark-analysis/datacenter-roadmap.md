@@ -54,11 +54,13 @@ port mirroring, whereas native InfiniBand needs tap hardware.
   dissect headers and known ULPs, not arbitrary payload.
 
 **5. Stateful analysis (the differentiator)**
-- **QP / connection tracking** — conversation keyed by Dest QP.
+- **QP / connection tracking** — conversation keyed by Dest QP. *(Done,
+  M5: keyed by (dst IP, dst QP).)*
 - **PSN sequence analysis** — drops, reorder, retransmit. The single
-  most valuable RoCE diagnostic.
+  most valuable RoCE diagnostic. *(Done, M5: `-z roce,psn`,
+  `src/analysis.rs`.)*
 - **Multi-packet message reassembly** (First/Middle/Last/Only).
-- **Congestion correlation** — ECN-marked → CNP → rate reaction.
+- **Congestion correlation** — ECN-marked → CNP → rate reaction. *(M4.)*
 
 ## Parallelism fit
 
@@ -92,11 +94,14 @@ but scoped to this domain:
 |----|-----------|----------|
 | **M1** | RoCEv2 BTH summary slice (MVP — DONE) | Detect UDP/4791, decode BTH opcode + Dest QP + PSN, dispatch to RETH/AETH, surface CNP and ECN/FECN/BECN flags, in the existing summary line |
 | **M2** | Field-tree model + `-V` + `-e` (DONE) | Typed named fields (`infiniband.bth.*`, `ip.*`, `tcp.*`, ...) on every dissector; `-V` verbose tree; `-e <field>` extraction |
-| **M3** | **Display filters over the field tree (DONE in this PR)** | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
+| **M3** | Display filters over the field tree (DONE) | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
+| **M5** | **QP-sharded, PSN-aware analysis pass (DONE in this PR)** | `-z roce,psn`: per-QP drop / reorder / retransmit detection keyed by (dst IP, dst QP), 24-bit PSN wrap handled, first-anomaly frame reported |
 | M4 | Congestion + fabric tier | ECN surfacing, CNP correlation, PFC pause frames, remaining ext headers |
-| M5 | QP-sharded, PSN-aware analysis pass | Per-QP drop/reorder/retransmit detection; the parallel design realized |
 | M6 | RDMA ULPs | NVMe-oF/RDMA first, then iSER / SMB Direct / IPoIB |
 | M7 | Native InfiniBand + RoCEv1 | LRH/GRH, DLT 247, ethertype 0x8915 |
+
+M5 landed ahead of M4 as the higher-value RDMA diagnostic and the
+payoff for the QP-shardable parallel design.
 
 ## MVP (M1) — the smallest vertical slice
 
