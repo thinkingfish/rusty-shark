@@ -37,14 +37,20 @@ capture order.
   extracts named field values (tab-separated, repeatable) — e.g.
   `-e infiniband.bth.psn -e infiniband.bth.destqp` to pipe RDMA
   sequence numbers into analysis.
-- `-c N`, `-q`, `-j N`, `-V`, `-e`, `--no-parallel`, `--batch N` flags.
+- **Display filters** (`-Y`): comparisons (`==`, `!=`, `<`, `<=`, `>`,
+  `>=` and eq/ne/lt/le/gt/ge aliases), boolean `&&`/`||`/`!`
+  (and/or/not), parentheses, and bare field/protocol existence tests.
+  Numeric literals accept decimal or `0x` hex. Examples:
+  `-Y 'infiniband.bth.destqp == 0x123'`,
+  `-Y 'ip.dsfield.ecn == 3'` (ECN-marked),
+  `-Y 'infiniband.bth.opcode == 0x11 || infiniband.bth.opcode == 0x81'`.
+- `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `--no-parallel`, `--batch N`.
 
 ## Not implemented
 
 - Live capture (no libpcap / dumpcap equivalent yet).
-- Display / read filters (`-Y`, `-R`). (The typed field tree that backs
-  them now exists; the filter engine is the next milestone.)
-- Two-pass analysis (`-2`).
+- Read filters (`-R`) and two-pass analysis (`-2`). (Single-pass
+  display filtering with `-Y` is supported.)
 - Hex dump (`-x`), PDML / PSML / JSON / EK output.
 - Stateful protocols that need reassembly, defragmentation, or conversation
   tracking (TLS, HTTP/2, stream-following, ...).
@@ -67,8 +73,9 @@ capture order.
     src/dissect.rs    — per-packet stateless dissectors
     src/roce.rs       — RoCEv2 / InfiniBand BTH dissection
     src/field.rs      — typed field tree (-V / -e), the filter foundation
+    src/dfilter.rs    — display-filter lexer / parser / evaluator (-Y)
     src/print.rs      — summary, verbose, and field-extraction formatting
-    src/pipeline.rs   — reader → parallel dissect → ordered print
+    src/pipeline.rs   — reader → parallel dissect → filter → ordered print
 
 ## License
 

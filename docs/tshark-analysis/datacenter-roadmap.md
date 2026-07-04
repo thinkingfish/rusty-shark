@@ -80,18 +80,19 @@ but scoped to this domain:
    PSN analysis possible. Every dissector now builds a `Vec<Node>` of
    typed fields alongside the summary columns (`src/field.rs`),
    consumed by `-V` and `-e`.
-2. **Display filters (`-Y`).** *(Next, M3.)* Enormously valuable here
+2. **Display filters (`-Y`).** *(Done, M3.)* Enormously valuable here
    (`infiniband.bth.psn`, `infiniband.bth.destqp`, `ip.dsfield.ecn`).
-   Builds directly on the field tree: the filter engine evaluates
-   expressions against node abbreviations and typed values.
+   A lexer / recursive-descent parser / evaluator (`src/dfilter.rs`)
+   runs expressions against the field tree's node abbreviations and
+   typed values; filtered output keeps original frame numbers.
 
 ## Milestones
 
 | ID | Milestone | Delivers |
 |----|-----------|----------|
 | **M1** | RoCEv2 BTH summary slice (MVP — DONE) | Detect UDP/4791, decode BTH opcode + Dest QP + PSN, dispatch to RETH/AETH, surface CNP and ECN/FECN/BECN flags, in the existing summary line |
-| **M2** | **Field-tree model + `-V` + `-e` (DONE in this PR)** | Typed named fields (`infiniband.bth.*`, `ip.*`, `tcp.*`, ...) on every dissector; `-V` verbose tree; `-e <field>` extraction |
-| M3 | Display filters over the field tree | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'` |
+| **M2** | Field-tree model + `-V` + `-e` (DONE) | Typed named fields (`infiniband.bth.*`, `ip.*`, `tcp.*`, ...) on every dissector; `-V` verbose tree; `-e <field>` extraction |
+| **M3** | **Display filters over the field tree (DONE in this PR)** | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
 | M4 | Congestion + fabric tier | ECN surfacing, CNP correlation, PFC pause frames, remaining ext headers |
 | M5 | QP-sharded, PSN-aware analysis pass | Per-QP drop/reorder/retransmit detection; the parallel design realized |
 | M6 | RDMA ULPs | NVMe-oF/RDMA first, then iSER / SMB Direct / IPoIB |

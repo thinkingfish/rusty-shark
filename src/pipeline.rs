@@ -3,7 +3,10 @@ use std::io::{BufWriter, Write};
 use anyhow::Result;
 use rayon::prelude::*;
 
+use anyhow::anyhow;
+
 use crate::cli::{Args, OutputMode};
+use crate::dfilter::Filter;
 use crate::dissect::{self, Dissection};
 use crate::field;
 use crate::pcap::{CaptureReader, RawPacket};
@@ -17,6 +20,15 @@ pub fn run(args: &Args) -> Result<()> {
             .num_threads(args.jobs)
             .build_global();
     }
+
+    // Compile the display filter once up front so a syntax error fails
+    // before we read any packets.
+    let filter = match &args.display_filter {
+        Some(src) => Some(
+            Filter::compile(src).map_err(|e| anyhow!("invalid display filter: {e}"))?,
+        ),
+        None => None,
+    };
 
     let mut reader = CaptureReader::open(&args.read_file)?;
 
@@ -37,7 +49,7 @@ pub fn run(args: &Args) -> Result<()> {
             break;
         }
 
-        flush_batch(&mut out, &mut batch, args)?;
+        flush_batch(&mut out, &mut batch, args, filter.as_ref())?;
     }
 
     out.flush()?;
@@ -71,6 +83,7 @@ fn flush_batch<W: Write>(
     out: &mut W,
     batch: &mut Vec<(FrameMeta, RawPacket)>,
     args: &Args,
+    filter: Option<&Filter>,
 ) -> Result<()> {
     // Dissect. Parallelism here is safe because `dissect::dissect` is pure
     // over a single packet. The batch is an owned `Vec`, so `par_iter` hands
@@ -85,7 +98,7 @@ fn flush_batch<W: Write>(
     };
 
     // Print in original order. `results` is index-aligned with `batch`.
-    if args.quiet {
+    if args.quiet && filter.is_none() {
         batch.clear();
         return Ok(());
     }
@@ -93,25 +106,36 @@ fn flush_batch<W: Write>(
     let mode = args.output_mode();
     for (i, d) in results.into_iter().enumerate() {
         let (meta, pkt) = &batch[i];
-        match mode {
-            OutputMode::Summary => {
-                writeln!(out, "{}", format_line(*meta, &d.summary))?;
+        let Dissection { summary, tree } = d;
+
+        // The searchable node set is needed when filtering, in verbose or
+        // field mode, and includes a synthesised Frame node so that
+        // `frame.*` fields are both filterable and extractable.
+        if filter.is_some() || mode != OutputMode::Summary {
+            let mut nodes = Vec::with_capacity(tree.len() + 1);
+            nodes.push(frame_node(*meta, pkt.orig_len, pkt.data.len()));
+            nodes.extend(tree);
+
+            if let Some(f) = filter {
+                if !f.matches(&nodes) {
+                    continue;
+                }
             }
-            OutputMode::Verbose => {
-                // Frame pseudo-protocol node, then each dissected layer.
-                let mut nodes = Vec::with_capacity(d.tree.len() + 1);
-                nodes.push(frame_node(*meta, pkt.orig_len, pkt.data.len()));
-                nodes.extend(d.tree);
-                field::write_verbose(out, &nodes)?;
-                writeln!(out)?; // blank line between packets
+            if args.quiet {
+                continue;
             }
-            OutputMode::Fields => {
-                // Frame fields are addressable too (frame.number, ...).
-                let mut nodes = Vec::with_capacity(d.tree.len() + 1);
-                nodes.push(frame_node(*meta, pkt.orig_len, pkt.data.len()));
-                nodes.extend(d.tree);
-                writeln!(out, "{}", format_fields(&nodes, &args.fields))?;
+            match mode {
+                OutputMode::Summary => writeln!(out, "{}", format_line(*meta, &summary))?,
+                OutputMode::Verbose => {
+                    field::write_verbose(out, &nodes)?;
+                    writeln!(out)?; // blank line between packets
+                }
+                OutputMode::Fields => {
+                    writeln!(out, "{}", format_fields(&nodes, &args.fields))?
+                }
             }
+        } else {
+            writeln!(out, "{}", format_line(*meta, &summary))?;
         }
     }
     batch.clear();
