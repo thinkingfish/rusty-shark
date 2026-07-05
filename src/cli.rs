@@ -59,6 +59,13 @@ pub struct Args {
     /// Analysis covers all packets read, independent of any -Y filter.
     #[arg(short = 'z', long = "statistics", value_name = "SPEC")]
     pub statistics: Option<String>,
+
+    /// Decode RC/UC RDMA SEND capsules as NVMe/RDMA (command and response
+    /// capsules, incl. Read/Write LBA ranges). NVMe-oF Fabrics capsules
+    /// are auto-detected without this; use it for captures you know carry
+    /// NVMe I/O so the data-plane commands decode too.
+    #[arg(long = "nvme")]
+    pub nvme: bool,
 }
 
 /// How each packet should be rendered, derived from the flags above.

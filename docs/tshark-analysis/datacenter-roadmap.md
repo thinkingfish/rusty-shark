@@ -47,11 +47,16 @@ port mirroring, whereas native InfiniBand needs tap hardware.
   AtomicETH, ImmDt, XRCETH.
 
 **4. RDMA upper-layer protocols**
-- Storage: NVMe-oF/RDMA, iSER, SRP, NFS/RDMA.
+- Storage: NVMe-oF/RDMA *(done, M6)*, iSER, SRP, NFS/RDMA.
 - Enterprise: SMB Direct.
 - General: IPoIB, RDS.
 - Caveat: raw RDMA WRITE/READ payloads are opaque remote memory; we
   dissect headers and known ULPs, not arbitrary payload.
+- Detection caveat: nothing in a lone SEND identifies its ULP — that's
+  set at connection time. NVMe-oF Fabrics capsules (SQE opcode 0x7F) are
+  distinctive enough to auto-detect; full NVMe I/O decode is opt-in via
+  `--nvme`. Robust auto-detection needs per-QP connection tracking (a
+  natural extension of the M5 per-QP state), tracked for later.
 
 **5. Stateful analysis (the differentiator)**
 - **QP / connection tracking** — conversation keyed by Dest QP. *(Done,
@@ -99,7 +104,7 @@ but scoped to this domain:
 | **M3** | Display filters over the field tree (DONE) | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
 | **M5** | QP-sharded, PSN-aware analysis pass (DONE) | `-z roce,psn`: per-QP drop / reorder / retransmit detection keyed by (dst IP, dst QP), 24-bit PSN wrap handled, first-anomaly frame reported |
 | **M4** | **Congestion + fabric tier (DONE in this PR)** | PFC (802.1Qbb) + PAUSE (802.3x) via ethertype 0x8808; ECN codepoints named (v4/v6); `-z roce,cong` per-QP CE-marked + CNP counts; ImmDt extended header |
-| M6 | RDMA ULPs | NVMe-oF/RDMA first, then iSER / SMB Direct / IPoIB |
+| **M6** | **RDMA ULPs — NVMe-oF/RDMA (DONE in this PR)** | Capsules on SEND: Fabrics commands auto-detected; `--nvme` decodes I/O commands (Read/Write SLBA/NLB) and CQE responses. iSER / SMB Direct / IPoIB still pending |
 | M7 | Native InfiniBand + RoCEv1 | LRH/GRH, DLT 247, ethertype 0x8915 |
 
 M5 landed ahead of M4; M4 then completed the congestion/fabric picture.
