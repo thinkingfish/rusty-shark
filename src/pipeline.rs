@@ -30,13 +30,15 @@ pub fn run(args: &Args) -> Result<()> {
     };
 
     // Which statistics report, if any, to accumulate.
-    let analyze = match args.statistics.as_deref() {
-        None => false,
-        Some("roce,psn") | Some("roce-psn") | Some("rdma,psn") => true,
+    let stat = match args.statistics.as_deref() {
+        None => None,
+        Some("roce,psn") | Some("roce-psn") | Some("rdma,psn") => Some(StatKind::Psn),
+        Some("roce,cong") | Some("roce-cong") | Some("rdma,cong") => Some(StatKind::Cong),
         Some(other) => bail!(
-            "unknown -z statistics spec {other:?}; supported: roce,psn"
+            "unknown -z statistics spec {other:?}; supported: roce,psn | roce,cong"
         ),
     };
+    let analyze = stat.is_some();
 
     let mut reader = CaptureReader::open(&args.read_file)?;
 
@@ -62,12 +64,21 @@ pub fn run(args: &Args) -> Result<()> {
         flush_batch(&mut out, &mut batch, args, filter.as_ref(), analyze, &mut records)?;
     }
 
-    if analyze {
-        write!(out, "{}", analysis::analyze(&records))?;
+    match stat {
+        Some(StatKind::Psn) => write!(out, "{}", analysis::analyze_psn(&records))?,
+        Some(StatKind::Cong) => write!(out, "{}", analysis::analyze_cong(&records))?,
+        None => {}
     }
 
     out.flush()?;
     Ok(())
+}
+
+/// Which `-z` statistics report was requested.
+#[derive(Debug, Clone, Copy)]
+enum StatKind {
+    Psn,
+    Cong,
 }
 
 fn fill_batch<R: std::io::Read>(

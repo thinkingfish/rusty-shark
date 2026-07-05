@@ -59,6 +59,7 @@ const ETHERTYPE_IPV4: u16 = 0x0800;
 const ETHERTYPE_ARP: u16 = 0x0806;
 const ETHERTYPE_IPV6: u16 = 0x86dd;
 const ETHERTYPE_VLAN: u16 = 0x8100;
+const ETHERTYPE_FLOW_CONTROL: u16 = 0x8808; // IEEE 802.3x PAUSE / 802.1Qbb PFC
 
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
@@ -87,7 +88,20 @@ fn ethertype_name(etype: u16) -> &'static str {
         ETHERTYPE_IPV6 => "IPv6",
         ETHERTYPE_ARP => "ARP",
         ETHERTYPE_VLAN => "802.1Q Virtual LAN",
+        ETHERTYPE_FLOW_CONTROL => "MAC Control",
         _ => "Unknown",
+    }
+}
+
+/// Human name for an ECN codepoint (the low 2 bits of the IP DS field).
+/// Central to RoCE congestion control (DCQCN): CE marking drives CNPs.
+fn ecn_name(ecn: u8) -> &'static str {
+    match ecn & 0x03 {
+        0 => "Not-ECT",
+        1 => "ECT(1)",
+        2 => "ECT(0)",
+        3 => "CE",
+        _ => unreachable!(),
     }
 }
 
@@ -127,6 +141,7 @@ fn dissect_ethernet(data: &[u8], d: &mut Dissection) {
         ETHERTYPE_IPV4 => dissect_ipv4(payload, d),
         ETHERTYPE_IPV6 => dissect_ipv6(payload, d),
         ETHERTYPE_ARP => dissect_arp(payload, d),
+        ETHERTYPE_FLOW_CONTROL => dissect_flow_control(payload, d),
         other => {
             d.summary.protocol = "ETH";
             if d.summary.info.is_empty() {
@@ -134,6 +149,120 @@ fn dissect_ethernet(data: &[u8], d: &mut Dissection) {
             }
         }
     }
+}
+
+/// MAC Control frames (ethertype 0x8808): IEEE 802.3x PAUSE and the
+/// per-priority variant 802.1Qbb PFC. On a lossless RoCE fabric these are
+/// how a congested port tells its upstream neighbour to hold off, so
+/// making them visible is central to diagnosing RoCE stalls.
+fn dissect_flow_control(data: &[u8], d: &mut Dissection) {
+    if data.len() < 2 {
+        d.summary.protocol = "MAC CTRL";
+        d.summary.info = "truncated MAC Control frame".into();
+        return;
+    }
+    let opcode = u16::from_be_bytes([data[0], data[1]]);
+    match opcode {
+        0x0001 => dissect_pause(data, d),
+        0x0101 => dissect_pfc(data, d),
+        other => {
+            d.summary.protocol = "MAC CTRL";
+            d.summary.info = format!("opcode 0x{other:04x}");
+            let mut node = Node::proto("MAC Control");
+            node.add(
+                "mac.control.opcode",
+                Value::Uint(other as u64),
+                format!("Opcode: 0x{other:04x}"),
+            );
+            d.tree.push(node);
+        }
+    }
+}
+
+/// IEEE 802.3x global PAUSE: a single pause time in quanta (512 bit-times).
+fn dissect_pause(data: &[u8], d: &mut Dissection) {
+    d.summary.protocol = "PAUSE";
+    let quanta = if data.len() >= 4 {
+        u16::from_be_bytes([data[2], data[3]])
+    } else {
+        0
+    };
+    d.summary.info = format!("MAC PAUSE: quanta={quanta}");
+
+    let mut node = Node::proto("MAC Control: Pause");
+    node.add(
+        "mac.control.opcode",
+        Value::Uint(0x0001),
+        "Opcode: Pause (0x0001)",
+    );
+    node.add(
+        "mac.control.pause.time",
+        Value::Uint(quanta as u64),
+        format!("Pause Time: {quanta} quanta"),
+    );
+    d.tree.push(node);
+}
+
+/// IEEE 802.1Qbb Priority Flow Control: a class-enable vector selects which
+/// of the 8 priority classes are paused, each with its own time in quanta.
+fn dissect_pfc(data: &[u8], d: &mut Dissection) {
+    d.summary.protocol = "PFC";
+    if data.len() < 4 {
+        d.summary.info = "truncated PFC frame".into();
+        return;
+    }
+    // data[2] is reserved (MS byte of the enable field); data[3] carries
+    // the class-enable vector, one bit per priority 0..7. Eight 2-byte
+    // time values follow at data[4..].
+    let enable = data[3];
+
+    let mut node = Node::proto("MAC Control: Priority Flow Control (PFC)");
+    node.add("mac.control.opcode", Value::Uint(0x0101), "Opcode: PFC (0x0101)");
+    node.add(
+        "pfc.enable",
+        Value::Uint(enable as u64),
+        format!("Class Enable Vector: 0x{enable:02x}"),
+    );
+
+    // Static abbreviations, one per priority class (no per-packet alloc).
+    const PFC_TIME_ABBREV: [&str; 8] = [
+        "pfc.time.prio0",
+        "pfc.time.prio1",
+        "pfc.time.prio2",
+        "pfc.time.prio3",
+        "pfc.time.prio4",
+        "pfc.time.prio5",
+        "pfc.time.prio6",
+        "pfc.time.prio7",
+    ];
+    let mut paused: Vec<String> = Vec::new();
+    for class in 0..8u8 {
+        let time = if data.len() >= 4 + 2 * (class as usize + 1) {
+            let o = 4 + 2 * class as usize;
+            u16::from_be_bytes([data[o], data[o + 1]])
+        } else {
+            0
+        };
+        let enabled = enable & (1 << class) != 0;
+        node.add(
+            PFC_TIME_ABBREV[class as usize],
+            Value::Uint(time as u64),
+            format!(
+                "Priority {class}: {} time={time}",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        );
+        if enabled {
+            paused.push(format!("P{class}={time}"));
+        }
+    }
+
+    d.summary.info = if paused.is_empty() {
+        "PFC: no classes paused".to_string()
+    } else {
+        format!("PFC pause: {}", paused.join(" "))
+    };
+    d.tree.push(node);
 }
 
 fn dissect_null(data: &[u8], d: &mut Dissection) {
@@ -232,7 +361,7 @@ fn dissect_ipv4(data: &[u8], d: &mut Dissection) {
     node.add(
         "ip.dsfield.ecn",
         Value::Uint(ecn as u64),
-        format!("ECN: 0x{ecn:02x}"),
+        format!("ECN: 0x{ecn:02x} ({})", ecn_name(ecn)),
     );
     node.add(
         "ip.len",
@@ -285,6 +414,10 @@ fn dissect_ipv6(data: &[u8], d: &mut Dissection) {
     let next_header = data[6];
     let hop_limit = data[7];
     let payload_len = u16::from_be_bytes([data[4], data[5]]) as usize;
+    // Traffic class spans the low nibble of byte 0 and high nibble of byte
+    // 1; the ECN codepoint is its low 2 bits.
+    let traffic_class = ((data[0] & 0x0f) << 4) | (data[1] >> 4);
+    let ecn = traffic_class & 0x03;
     let src = Ipv6Addr::from(<[u8; 16]>::try_from(&data[8..24]).unwrap());
     let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&data[24..40]).unwrap());
     d.summary.src = src.to_string();
@@ -295,6 +428,11 @@ fn dissect_ipv6(data: &[u8], d: &mut Dissection) {
         "Internet Protocol Version 6, Src: {src}, Dst: {dst}"
     ));
     node.add("ipv6.version", Value::Uint(6), "Version: 6");
+    node.add(
+        "ipv6.dsfield.ecn",
+        Value::Uint(ecn as u64),
+        format!("ECN: 0x{ecn:02x} ({})", ecn_name(ecn)),
+    );
     node.add(
         "ipv6.plen",
         Value::Uint(payload_len as u64),
