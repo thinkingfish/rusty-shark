@@ -3,6 +3,7 @@ mod cli;
 mod dfilter;
 mod dissect;
 mod field;
+mod nvme;
 mod pcap;
 mod pcapng;
 mod pipeline;

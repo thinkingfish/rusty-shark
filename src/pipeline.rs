@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use crate::analysis::{self, Rec};
 use crate::cli::{Args, OutputMode};
 use crate::dfilter::Filter;
-use crate::dissect::{self, Dissection};
+use crate::dissect::{self, Dissection, DissectConfig};
 use crate::field;
 use crate::pcap::{CaptureReader, RawPacket};
 use crate::print::{FrameMeta, column, format_fields, format_line, frame_node};
@@ -40,6 +40,10 @@ pub fn run(args: &Args) -> Result<()> {
     };
     let analyze = stat.is_some();
 
+    let cfg = DissectConfig {
+        nvme_force: args.nvme,
+    };
+
     let mut reader = CaptureReader::open(&args.read_file)?;
 
     let stdout = std::io::stdout();
@@ -61,7 +65,15 @@ pub fn run(args: &Args) -> Result<()> {
             break;
         }
 
-        flush_batch(&mut out, &mut batch, args, filter.as_ref(), analyze, &mut records)?;
+        flush_batch(
+            &mut out,
+            &mut batch,
+            args,
+            filter.as_ref(),
+            analyze,
+            &mut records,
+            &cfg,
+        )?;
     }
 
     match stat {
@@ -104,6 +116,7 @@ fn fill_batch<R: std::io::Read>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flush_batch<W: Write>(
     out: &mut W,
     batch: &mut Vec<(FrameMeta, RawPacket)>,
@@ -111,16 +124,17 @@ fn flush_batch<W: Write>(
     filter: Option<&Filter>,
     analyze: bool,
     records: &mut Vec<Rec>,
+    cfg: &DissectConfig,
 ) -> Result<()> {
     // Dissect. Parallelism here is safe because `dissect::dissect` is pure
     // over a single packet. The batch is an owned `Vec`, so `par_iter` hands
     // each worker a slice of it with no aliasing.
     let results: Vec<Dissection> = if args.no_parallel {
-        batch.iter().map(|(_, p)| dissect::dissect(p)).collect()
+        batch.iter().map(|(_, p)| dissect::dissect(p, cfg)).collect()
     } else {
         batch
             .par_iter()
-            .map(|(_, p)| dissect::dissect(p))
+            .map(|(_, p)| dissect::dissect(p, cfg))
             .collect()
     };
 

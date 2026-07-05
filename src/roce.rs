@@ -13,14 +13,15 @@
 //! are also the natural sharding key / ordering key for a future
 //! QP-parallel, PSN-aware analysis pass.
 //!
-//! Not handled yet: the 4-byte ICRC trailer (present but neither stripped nor
-//! validated), RoCEv1 (ethertype 0x8915), native InfiniBand (LRH/GRH), and
-//! upper-layer protocols (NVMe-oF, iSER, SMB Direct, ...). See
+//! Upper-layer protocols: NVMe/RDMA capsules riding on SEND operations are
+//! handed to `crate::nvme` (the ICRC trailer is stripped first). Not
+//! handled yet: RoCEv1 (ethertype 0x8915), native InfiniBand (LRH/GRH),
+//! ICRC validation, and other ULPs (iSER, SMB Direct, ...). See
 //! docs/tshark-analysis/datacenter-roadmap.md.
 
 use std::fmt::Write;
 
-use crate::dissect::Dissection;
+use crate::dissect::{Dissection, DissectConfig};
 use crate::field::{Node, Value};
 
 /// The well-known UDP destination port for RoCEv2.
@@ -32,7 +33,7 @@ const BTH_LEN: usize = 12;
 /// Decode a RoCEv2 payload (the bytes following the UDP header). The IP
 /// src/dst columns are already populated; we overwrite the protocol and
 /// info columns and append a BTH protocol node to the detail tree.
-pub fn dissect(payload: &[u8], d: &mut Dissection) {
+pub fn dissect(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     d.summary.protocol = "RoCE";
     if payload.len() < BTH_LEN {
         d.summary.info = "truncated BTH".into();
@@ -104,7 +105,23 @@ pub fn dissect(payload: &[u8], d: &mut Dissection) {
     // next, and some operations carry more than one (e.g. RDMA WRITE Only
     // with Immediate is RETH followed by ImmDt).
     let ext = &payload[BTH_LEN..];
-    decode_ext_headers(opcode, ext, &mut info, &mut node);
+    let ext_len = decode_ext_headers(opcode, ext, &mut info, &mut node);
+
+    // Upper-layer protocol: NVMe/RDMA capsules ride on SEND operations.
+    // The SEND payload is whatever follows the extended headers, minus the
+    // trailing 4-byte ICRC. Fabrics capsules are auto-detected; full NVMe
+    // decode requires --nvme (cfg.nvme_force).
+    if is_send_opcode(opcode) {
+        let after_ext = &ext[ext_len.min(ext.len())..];
+        let capsule = strip_icrc(after_ext);
+        if !capsule.is_empty() {
+            if let Some(label) =
+                crate::nvme::try_dissect(capsule, cfg.nvme_force, &mut info, &mut node)
+            {
+                d.summary.protocol = label;
+            }
+        }
+    }
 
     // Trailing flags of interest for congestion / reliability debugging.
     let mut flags: Vec<&str> = Vec::new();
@@ -134,12 +151,13 @@ pub fn dissect(payload: &[u8], d: &mut Dissection) {
 
 /// Append every extended transport header carried by this opcode, in
 /// order, advancing through `ext`. RC/UC/RD share the base RDMA-family
-/// operation numbering, so the operation bits select the headers.
-fn decode_ext_headers(opcode: u8, ext: &[u8], info: &mut String, node: &mut Node) {
+/// operation numbering, so the operation bits select the headers. Returns
+/// the total number of bytes the extended headers consumed.
+fn decode_ext_headers(opcode: u8, ext: &[u8], info: &mut String, node: &mut Node) -> usize {
     let op = opcode & 0x1f;
     let svc = opcode >> 5;
     if svc > 2 {
-        return; // UD/CNP/XRC extended headers not decoded here
+        return 0; // UD/CNP/XRC extended headers not decoded here
     }
     let mut off = 0usize;
     // RETH: RDMA WRITE First/Only, WRITE Only w/ Imm, READ Request.
@@ -153,7 +171,27 @@ fn decode_ext_headers(opcode: u8, ext: &[u8], info: &mut String, node: &mut Node
     // ImmDt: the "with Immediate" variants — SEND (0x03/0x05) and RDMA
     // WRITE (0x09/0x0b). For WRITE Only w/ Imm it follows the RETH above.
     if matches!(op, 0x03 | 0x05 | 0x09 | 0x0b) {
-        append_immdt(&ext[off.min(ext.len())..], info, node);
+        off += append_immdt(&ext[off.min(ext.len())..], info, node);
+    }
+    off
+}
+
+/// True for the SEND family (First/Middle/Last/Only, plain and with
+/// Immediate / Invalidate) on RC/UC service — the operations that carry
+/// an upper-layer capsule payload.
+fn is_send_opcode(opcode: u8) -> bool {
+    let svc = opcode >> 5;
+    let op = opcode & 0x1f;
+    matches!(svc, 0 | 1) && matches!(op, 0x00..=0x05 | 0x16 | 0x17)
+}
+
+/// Drop the trailing 4-byte Invariant CRC that ends every IB/RoCE packet,
+/// leaving just the upper-layer payload.
+fn strip_icrc(bytes: &[u8]) -> &[u8] {
+    if bytes.len() > 4 {
+        &bytes[..bytes.len() - 4]
+    } else {
+        &[]
     }
 }
 
@@ -331,7 +369,7 @@ mod tests {
         // RC SEND Only (0x04), DQP 0xd2, PSN 1, AckReq set (byte8 0x80).
         let payload = bth(0x04, 0x0000d2, 1, 0x00, 0x00, 0x80);
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         let s = &d.summary;
         assert_eq!(s.protocol, "RoCE");
         assert!(s.info.contains("RC SEND Only"), "{}", s.info);
@@ -352,7 +390,7 @@ mod tests {
         payload.extend_from_slice(&0xdead_beefu32.to_be_bytes()); // RKey
         payload.extend_from_slice(&4096u32.to_be_bytes()); // DMA length
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         let s = &d.summary;
         assert!(s.info.contains("RDMA WRITE Only"), "{}", s.info);
         assert!(s.info.contains("VA=0x1122334455667788"), "{}", s.info);
@@ -372,7 +410,7 @@ mod tests {
         payload.push(0x00); // syndrome: ACK
         payload.extend_from_slice(&[0x00, 0x00, 0x07]); // MSN = 7
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         let s = &d.summary;
         assert!(s.info.contains("Acknowledge"), "{}", s.info);
         assert!(s.info.contains("ACK"), "{}", s.info);
@@ -384,7 +422,7 @@ mod tests {
     fn cnp_congestion_packet() {
         let payload = bth(0x81, 0x000abc, 0, 0x00, 0x00, 0x00);
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         assert!(d.summary.info.contains("CNP"), "{}", d.summary.info);
     }
 
@@ -393,7 +431,7 @@ mod tests {
         // FECN + BECN set in byte 4.
         let payload = bth(0x04, 0x000001, 5, 0x00, 0xc0, 0x00);
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         assert!(d.summary.info.contains("FECN"), "{}", d.summary.info);
         assert!(d.summary.info.contains("BECN"), "{}", d.summary.info);
         assert_eq!(extract(&d.tree, "infiniband.bth.fecn"), Some(&Value::Uint(1)));
@@ -404,7 +442,7 @@ mod tests {
     fn truncated_bth() {
         let payload = vec![0u8; 8];
         let mut d = dis();
-        dissect(&payload, &mut d);
+        dissect(&payload, &mut d, &DissectConfig::default());
         assert_eq!(d.summary.protocol, "RoCE");
         assert!(d.summary.info.contains("truncated"), "{}", d.summary.info);
     }

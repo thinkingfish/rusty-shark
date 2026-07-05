@@ -37,6 +37,14 @@ impl Summary {
     }
 }
 
+/// Per-run dissection options that individual dissectors consult.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DissectConfig {
+    /// Force NVMe/RDMA decode of every RC/UC SEND capsule (`--nvme`).
+    /// NVMe-oF Fabrics capsules are auto-detected regardless.
+    pub nvme_force: bool,
+}
+
 /// The full result of dissecting one packet: summary columns plus the
 /// protocol detail tree (a flat list of protocol-layer nodes, each with
 /// field children — matching tshark's `-V` layout where protocol layers
@@ -66,14 +74,14 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
 
-pub fn dissect(pkt: &RawPacket) -> Dissection {
+pub fn dissect(pkt: &RawPacket, cfg: &DissectConfig) -> Dissection {
     let mut d = Dissection::new(pkt.orig_len);
     let data = &pkt.data[..];
     match pkt.link_type {
-        LinkType::Ethernet => dissect_ethernet(data, &mut d),
-        LinkType::RawIp => dissect_ip_auto(data, &mut d),
-        LinkType::Null => dissect_null(data, &mut d),
-        LinkType::LinuxSll => dissect_linux_sll(data, &mut d),
+        LinkType::Ethernet => dissect_ethernet(data, &mut d, cfg),
+        LinkType::RawIp => dissect_ip_auto(data, &mut d, cfg),
+        LinkType::Null => dissect_null(data, &mut d, cfg),
+        LinkType::LinuxSll => dissect_linux_sll(data, &mut d, cfg),
         LinkType::Other(n) => {
             d.summary.protocol = "LINK";
             d.summary.info = format!("unsupported DLT {n}, {} bytes", data.len());
@@ -105,7 +113,7 @@ fn ecn_name(ecn: u8) -> &'static str {
     }
 }
 
-fn dissect_ethernet(data: &[u8], d: &mut Dissection) {
+fn dissect_ethernet(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     if data.len() < 14 {
         d.summary.protocol = "ETH";
         d.summary.info = "truncated ethernet header".into();
@@ -138,8 +146,8 @@ fn dissect_ethernet(data: &[u8], d: &mut Dissection) {
 
     let payload = &data[off.min(data.len())..];
     match etype {
-        ETHERTYPE_IPV4 => dissect_ipv4(payload, d),
-        ETHERTYPE_IPV6 => dissect_ipv6(payload, d),
+        ETHERTYPE_IPV4 => dissect_ipv4(payload, d, cfg),
+        ETHERTYPE_IPV6 => dissect_ipv6(payload, d, cfg),
         ETHERTYPE_ARP => dissect_arp(payload, d),
         ETHERTYPE_FLOW_CONTROL => dissect_flow_control(payload, d),
         other => {
@@ -265,7 +273,7 @@ fn dissect_pfc(data: &[u8], d: &mut Dissection) {
     d.tree.push(node);
 }
 
-fn dissect_null(data: &[u8], d: &mut Dissection) {
+fn dissect_null(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     // BSD loopback: 4-byte protocol family, host byte order. 2 = IPv4,
     // 24/28/30 = IPv6 depending on platform. Accept common values.
     if data.len() < 4 {
@@ -276,8 +284,8 @@ fn dissect_null(data: &[u8], d: &mut Dissection) {
     let fam_be = u32::from_be_bytes(data[0..4].try_into().unwrap());
     let payload = &data[4..];
     match (fam_le, fam_be) {
-        (2, _) | (_, 2) => dissect_ipv4(payload, d),
-        (24, _) | (_, 24) | (28, _) | (_, 28) | (30, _) | (_, 30) => dissect_ipv6(payload, d),
+        (2, _) | (_, 2) => dissect_ipv4(payload, d, cfg),
+        (24, _) | (_, 24) | (28, _) | (_, 28) | (30, _) | (_, 30) => dissect_ipv6(payload, d, cfg),
         _ => {
             d.summary.protocol = "NULL";
             d.summary.info = format!("family 0x{fam_le:08x}");
@@ -285,7 +293,7 @@ fn dissect_null(data: &[u8], d: &mut Dissection) {
     }
 }
 
-fn dissect_linux_sll(data: &[u8], d: &mut Dissection) {
+fn dissect_linux_sll(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     if data.len() < 16 {
         d.summary.protocol = "SLL";
         return;
@@ -293,8 +301,8 @@ fn dissect_linux_sll(data: &[u8], d: &mut Dissection) {
     let etype = u16::from_be_bytes([data[14], data[15]]);
     let payload = &data[16..];
     match etype {
-        ETHERTYPE_IPV4 => dissect_ipv4(payload, d),
-        ETHERTYPE_IPV6 => dissect_ipv6(payload, d),
+        ETHERTYPE_IPV4 => dissect_ipv4(payload, d, cfg),
+        ETHERTYPE_IPV6 => dissect_ipv6(payload, d, cfg),
         ETHERTYPE_ARP => dissect_arp(payload, d),
         other => {
             d.summary.protocol = "SLL";
@@ -303,13 +311,13 @@ fn dissect_linux_sll(data: &[u8], d: &mut Dissection) {
     }
 }
 
-fn dissect_ip_auto(data: &[u8], d: &mut Dissection) {
+fn dissect_ip_auto(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     if data.is_empty() {
         return;
     }
     match data[0] >> 4 {
-        4 => dissect_ipv4(data, d),
-        6 => dissect_ipv6(data, d),
+        4 => dissect_ipv4(data, d, cfg),
+        6 => dissect_ipv6(data, d, cfg),
         _ => {
             d.summary.protocol = "IP";
             d.summary.info = format!("unknown IP version {}", data[0] >> 4);
@@ -327,7 +335,7 @@ fn ip_proto_name(proto: u8) -> &'static str {
     }
 }
 
-fn dissect_ipv4(data: &[u8], d: &mut Dissection) {
+fn dissect_ipv4(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     if data.len() < 20 {
         d.summary.protocol = "IPv4";
         d.summary.info = "truncated IPv4 header".into();
@@ -398,14 +406,14 @@ fn dissect_ipv4(data: &[u8], d: &mut Dissection) {
     match proto {
         IPPROTO_ICMP => dissect_icmp(payload, d),
         IPPROTO_TCP => dissect_tcp(payload, d),
-        IPPROTO_UDP => dissect_udp(payload, d, false),
+        IPPROTO_UDP => dissect_udp(payload, d, false, cfg),
         other => {
             d.summary.info = format!("proto {other}");
         }
     }
 }
 
-fn dissect_ipv6(data: &[u8], d: &mut Dissection) {
+fn dissect_ipv6(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
     if data.len() < 40 {
         d.summary.protocol = "IPv6";
         d.summary.info = "truncated IPv6 header".into();
@@ -464,7 +472,7 @@ fn dissect_ipv6(data: &[u8], d: &mut Dissection) {
     let payload = &data[40..end];
     match next_header {
         IPPROTO_TCP => dissect_tcp(payload, d),
-        IPPROTO_UDP => dissect_udp(payload, d, true),
+        IPPROTO_UDP => dissect_udp(payload, d, true, cfg),
         IPPROTO_ICMPV6 => dissect_icmpv6(payload, d),
         other => {
             d.summary.info = format!("next header {other}");
@@ -603,7 +611,7 @@ fn dissect_tcp(data: &[u8], d: &mut Dissection) {
     d.tree.push(node);
 }
 
-fn dissect_udp(data: &[u8], d: &mut Dissection, _is_ipv6: bool) {
+fn dissect_udp(data: &[u8], d: &mut Dissection, _is_ipv6: bool, cfg: &DissectConfig) {
     if data.len() < 8 {
         d.summary.protocol = "UDP";
         d.summary.info = "truncated UDP header".into();
@@ -641,7 +649,7 @@ fn dissect_udp(data: &[u8], d: &mut Dissection, _is_ipv6: bool) {
     if dport == crate::roce::ROCE_V2_UDP_PORT || sport == crate::roce::ROCE_V2_UDP_PORT {
         // RoCEv2: InfiniBand transport over UDP/4791. The destination port
         // is the reliable indicator; the source port is flow entropy.
-        crate::roce::dissect(payload, d);
+        crate::roce::dissect(payload, d, cfg);
     } else if sport == 53 || dport == 53 {
         dissect_dns(payload, d);
     } else if sport == 67 || sport == 68 || dport == 67 || dport == 68 {
@@ -838,7 +846,7 @@ mod tests {
     #[test]
     fn dissect_tcp_syn_ipv4_over_ethernet() {
         let pkt = raw(tcp_syn_frame());
-        let d = dissect(&pkt);
+        let d = dissect(&pkt, &DissectConfig::default());
         let s = &d.summary;
         assert_eq!(s.protocol, "TCP");
         assert_eq!(s.src, "192.168.0.1");
@@ -851,7 +859,7 @@ mod tests {
     #[test]
     fn tree_has_named_fields() {
         let pkt = raw(tcp_syn_frame());
-        let d = dissect(&pkt);
+        let d = dissect(&pkt, &DissectConfig::default());
         // Protocol layers are siblings at the top level.
         assert_eq!(d.tree.len(), 3); // Ethernet, IPv4, TCP
         assert_eq!(
@@ -879,7 +887,7 @@ mod tests {
         ];
         eth.extend_from_slice(&arp);
         let pkt = raw(eth);
-        let d = dissect(&pkt);
+        let d = dissect(&pkt, &DissectConfig::default());
         assert_eq!(d.summary.protocol, "ARP");
         assert_eq!(d.summary.src, "10.0.0.1");
         assert_eq!(d.summary.dst, "10.0.0.2");
@@ -923,7 +931,7 @@ mod tests {
         frame.extend_from_slice(&ipv4);
         frame.extend_from_slice(&[0; 8]); // too-short TCP
         let pkt = raw(frame);
-        let d = dissect(&pkt);
+        let d = dissect(&pkt, &DissectConfig::default());
         assert_eq!(d.summary.protocol, "TCP");
         assert!(d.summary.info.contains("truncated"));
     }

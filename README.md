@@ -32,8 +32,11 @@ capture order.
   Dest QP, PSN, RETH/AETH/ImmDt extended headers, CNP, and ECN/FECN/BECN
   congestion flags. Fabric flow control: IEEE 802.3x PAUSE and 802.1Qbb
   PFC (per-priority pause) via ethertype 0x8808. IP ECN codepoints named
-  (Not-ECT / ECT(0) / ECT(1) / CE) for v4 and v6. See
-  `docs/tshark-analysis/datacenter-roadmap.md`.
+  (Not-ECT / ECT(0) / ECT(1) / CE) for v4 and v6.
+- **NVMe over Fabrics / RDMA:** capsules on RDMA SEND — NVMe-oF Fabrics
+  commands (Connect / Property Get/Set) auto-detected; `--nvme` forces
+  full decode of I/O commands (Read/Write with SLBA/NLB) and CQE
+  responses. See `docs/tshark-analysis/datacenter-roadmap.md`.
 - Parallel dissection (`rayon`), reader-batched for bounded memory.
 - **Protocol detail tree** with typed, named fields behind every
   dissector: `-V` prints the full tree (tshark-style), `-e <field>`
@@ -56,8 +59,8 @@ capture order.
     parallel design was built for.
   - `-z roce,cong` — congestion: per-QP count of ECN CE-marked packets
     and CNPs, exposing the DCQCN loop (CE marks upstream → CNPs back).
-- `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `-z`, `--no-parallel`,
-  `--batch N`.
+- `-c N`, `-q`, `-j N`, `-V`, `-e`, `-Y`, `-z`, `--nvme`,
+  `--no-parallel`, `--batch N`.
 
 ## Not implemented
 
@@ -88,7 +91,8 @@ capture order.
     src/roce.rs       — RoCEv2 / InfiniBand BTH dissection
     src/field.rs      — typed field tree (-V / -e), the filter foundation
     src/dfilter.rs    — display-filter lexer / parser / evaluator (-Y)
-    src/analysis.rs   — per-QP RoCE PSN analysis (-z roce,psn)
+    src/nvme.rs       — NVMe-oF / RDMA capsule dissection (--nvme)
+    src/analysis.rs   — per-QP RoCE PSN + congestion analysis (-z)
     src/print.rs      — summary, verbose, and field-extraction formatting
     src/pipeline.rs   — reader → parallel dissect → filter → ordered print
 
