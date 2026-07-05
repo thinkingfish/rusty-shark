@@ -104,13 +104,15 @@ but scoped to this domain:
 | **M3** | Display filters over the field tree (DONE) | `-Y 'infiniband.bth.destqp == 0x123 && infiniband.bth.opcode == 0x0a'`; comparisons, booleans, parens, existence tests |
 | **M5** | QP-sharded, PSN-aware analysis pass (DONE) | `-z roce,psn`: per-QP drop / reorder / retransmit detection keyed by (dst IP, dst QP), 24-bit PSN wrap handled, first-anomaly frame reported |
 | **M4** | **Congestion + fabric tier (DONE in this PR)** | PFC (802.1Qbb) + PAUSE (802.3x) via ethertype 0x8808; ECN codepoints named (v4/v6); `-z roce,cong` per-QP CE-marked + CNP counts; ImmDt extended header |
-| **M6** | **RDMA ULPs — NVMe-oF/RDMA (DONE in this PR)** | Capsules on SEND: Fabrics commands auto-detected; `--nvme` decodes I/O commands (Read/Write SLBA/NLB) and CQE responses. iSER / SMB Direct / IPoIB still pending |
-| M7 | Native InfiniBand + RoCEv1 | LRH/GRH, DLT 247, ethertype 0x8915 |
+| **M6** | RDMA ULPs — NVMe-oF/RDMA (DONE) | Capsules on SEND: Fabrics commands auto-detected; `--nvme` decodes I/O commands (Read/Write SLBA/NLB) and CQE responses. iSER / SMB Direct / IPoIB still pending |
+| **M7** | **Native InfiniBand + RoCEv1 (DONE in this PR)** | RoCEv1 (GRH+BTH, ethertype 0x8915); native IB (LRH → optional GRH → BTH, DLT 247); GID/LID address columns; full `infiniband.grh.*` / `infiniband.lrh.*` fields |
 
 M5 landed ahead of M4; M4 then completed the congestion/fabric picture.
-Remaining BTH extended headers not yet decoded: DETH (UD), RDETH
-(reliable datagram), AtomicETH (compare-and-swap / fetch-and-add) —
-tracked for a follow-up; ImmDt and RETH/AETH are done.
+All seven datacenter milestones are now done. Remaining follow-ups:
+DETH (UD), RDETH, AtomicETH extended headers; the other RDMA ULPs (iSER,
+SMB Direct, SRP, NFS/RDMA, IPoIB); connection-based ULP auto-detection;
+ICRC validation; and the fabric-config protocols (LLDP/DCBX, PTP).
+ImmDt and RETH/AETH extended headers are done.
 
 ## MVP (M1) — the smallest vertical slice
 

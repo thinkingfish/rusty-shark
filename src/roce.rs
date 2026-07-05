@@ -13,13 +13,15 @@
 //! are also the natural sharding key / ordering key for a future
 //! QP-parallel, PSN-aware analysis pass.
 //!
+//! Also handled here: RoCEv1 (GRH + BTH over Ethernet, via `dissect_grh`)
+//! and native InfiniBand (LRH → optional GRH → BTH, via `dissect_lrh`).
 //! Upper-layer protocols: NVMe/RDMA capsules riding on SEND operations are
 //! handed to `crate::nvme` (the ICRC trailer is stripped first). Not
-//! handled yet: RoCEv1 (ethertype 0x8915), native InfiniBand (LRH/GRH),
-//! ICRC validation, and other ULPs (iSER, SMB Direct, ...). See
-//! docs/tshark-analysis/datacenter-roadmap.md.
+//! handled yet: ICRC validation, and other ULPs (iSER, SMB Direct, ...).
+//! See docs/tshark-analysis/datacenter-roadmap.md.
 
 use std::fmt::Write;
+use std::net::Ipv6Addr;
 
 use crate::dissect::{Dissection, DissectConfig};
 use crate::field::{Node, Value};
@@ -29,12 +31,23 @@ pub const ROCE_V2_UDP_PORT: u16 = 4791;
 
 /// InfiniBand Base Transport Header length, in bytes.
 const BTH_LEN: usize = 12;
+/// InfiniBand Global Route Header length, in bytes (IPv6-header-shaped).
+const GRH_LEN: usize = 40;
+/// InfiniBand Local Route Header length, in bytes.
+const LRH_LEN: usize = 8;
 
 /// Decode a RoCEv2 payload (the bytes following the UDP header). The IP
 /// src/dst columns are already populated; we overwrite the protocol and
 /// info columns and append a BTH protocol node to the detail tree.
 pub fn dissect(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
-    d.summary.protocol = "RoCE";
+    dissect_bth(payload, d, cfg, "RoCE");
+}
+
+/// Decode starting at the InfiniBand Base Transport Header. `proto` is the
+/// column label for the enclosing transport ("RoCE" for RoCEv1/v2, "IB"
+/// for native InfiniBand); an upper-layer protocol may override it.
+fn dissect_bth(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig, proto: &'static str) {
+    d.summary.protocol = proto;
     if payload.len() < BTH_LEN {
         d.summary.info = "truncated BTH".into();
         d.tree.push(Node::proto("InfiniBand Base Transport Header (truncated)"));
@@ -147,6 +160,104 @@ pub fn dissect(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
 
     d.summary.info = info;
     d.tree.push(node);
+}
+
+/// Decode starting at the InfiniBand Global Route Header (40 bytes,
+/// IPv6-header-shaped), then hand off to the BTH. This is the RoCEv1 path
+/// (reached via ethertype 0x8915) and the "IBA global" native-IB path.
+/// The source/destination GIDs become the address columns.
+pub fn dissect_grh(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig, proto: &'static str) {
+    d.summary.protocol = proto;
+    if payload.len() < GRH_LEN {
+        d.summary.info = "truncated GRH".into();
+        d.tree.push(Node::proto("InfiniBand Global Route Header (truncated)"));
+        return;
+    }
+    let ipver = payload[0] >> 4;
+    let tclass = ((payload[0] & 0x0f) << 4) | (payload[1] >> 4);
+    let flow_label = ((payload[1] as u32 & 0x0f) << 16)
+        | ((payload[2] as u32) << 8)
+        | payload[3] as u32;
+    let paylen = u16::from_be_bytes([payload[4], payload[5]]);
+    let next_hdr = payload[6];
+    let hop_limit = payload[7];
+    let sgid = Ipv6Addr::from(<[u8; 16]>::try_from(&payload[8..24]).unwrap());
+    let dgid = Ipv6Addr::from(<[u8; 16]>::try_from(&payload[24..40]).unwrap());
+
+    d.summary.src = sgid.to_string();
+    d.summary.dst = dgid.to_string();
+
+    let mut node = Node::proto(format!(
+        "InfiniBand Global Route Header, SGID: {sgid}, DGID: {dgid}"
+    ));
+    node.add("infiniband.grh.ipver", Value::Uint(ipver as u64), format!("IP Version: {ipver}"));
+    node.add("infiniband.grh.tclass", Value::Uint(tclass as u64), format!("Traffic Class: {tclass}"));
+    node.add(
+        "infiniband.grh.flowlabel",
+        Value::Uint(flow_label as u64),
+        format!("Flow Label: {flow_label}"),
+    );
+    node.add("infiniband.grh.paylen", Value::Uint(paylen as u64), format!("Payload Length: {paylen}"));
+    node.add(
+        "infiniband.grh.nxthdr",
+        Value::Uint(next_hdr as u64),
+        format!("Next Header: {next_hdr} (0x{next_hdr:02x})"),
+    );
+    node.add("infiniband.grh.hoplmt", Value::Uint(hop_limit as u64), format!("Hop Limit: {hop_limit}"));
+    node.add("infiniband.grh.sgid", Value::Str(sgid.to_string()), format!("Source GID: {sgid}"));
+    node.add("infiniband.grh.dgid", Value::Str(dgid.to_string()), format!("Destination GID: {dgid}"));
+    d.tree.push(node);
+
+    // Next Header 0x1B (27) is the IBA BTH; anything else we don't follow.
+    dissect_bth(&payload[GRH_LEN..], d, cfg, proto);
+}
+
+/// Decode native InfiniBand starting at the Local Route Header (8 bytes).
+/// The Link Next Header (LNH) selects what follows: BTH directly, or a GRH
+/// then BTH. Reached from pcap DLT 247.
+pub fn dissect_lrh(payload: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
+    d.summary.protocol = "IB";
+    if payload.len() < LRH_LEN {
+        d.summary.info = "truncated LRH".into();
+        d.tree.push(Node::proto("InfiniBand Local Route Header (truncated)"));
+        return;
+    }
+    let vl = payload[0] >> 4;
+    let lver = payload[0] & 0x0f;
+    let sl = payload[1] >> 4;
+    let lnh = payload[1] & 0x03;
+    let dlid = u16::from_be_bytes([payload[2], payload[3]]);
+    let pktlen = u16::from_be_bytes([payload[4], payload[5]]) & 0x07ff;
+    let slid = u16::from_be_bytes([payload[6], payload[7]]);
+
+    d.summary.src = format!("LID {slid}");
+    d.summary.dst = format!("LID {dlid}");
+
+    let mut node = Node::proto(format!(
+        "InfiniBand Local Route Header, SLID: {slid}, DLID: {dlid}"
+    ));
+    node.add("infiniband.lrh.vl", Value::Uint(vl as u64), format!("Virtual Lane: {vl}"));
+    node.add("infiniband.lrh.lver", Value::Uint(lver as u64), format!("Link Version: {lver}"));
+    node.add("infiniband.lrh.sl", Value::Uint(sl as u64), format!("Service Level: {sl}"));
+    node.add(
+        "infiniband.lrh.lnh",
+        Value::Uint(lnh as u64),
+        format!("Link Next Header: {lnh}"),
+    );
+    node.add("infiniband.lrh.dlid", Value::Uint(dlid as u64), format!("Destination LID: {dlid}"));
+    node.add("infiniband.lrh.pktlen", Value::Uint(pktlen as u64), format!("Packet Length: {pktlen}"));
+    node.add("infiniband.lrh.slid", Value::Uint(slid as u64), format!("Source LID: {slid}"));
+    d.tree.push(node);
+
+    let rest = &payload[LRH_LEN..];
+    match lnh {
+        0b11 => dissect_grh(rest, d, cfg, "IB"), // IBA global: GRH then BTH
+        0b10 => dissect_bth(rest, d, cfg, "IB"), // IBA local: BTH directly
+        other => {
+            // 0b00 raw, 0b01 IP non-IBA — not decoded further.
+            d.summary.info = format!("LNH {other} (non-IBA payload)");
+        }
+    }
 }
 
 /// Append every extended transport header carried by this opcode, in
@@ -445,5 +556,92 @@ mod tests {
         dissect(&payload, &mut d, &DissectConfig::default());
         assert_eq!(d.summary.protocol, "RoCE");
         assert!(d.summary.info.contains("truncated"), "{}", d.summary.info);
+    }
+
+    fn grh(next_hdr: u8, bth: &[u8]) -> Vec<u8> {
+        let mut g = vec![0u8; GRH_LEN];
+        g[0] = 0x60; // IPVer 6
+        g[6] = next_hdr;
+        g[7] = 64; // hop limit
+        // SGID = ::1, DGID = ::2 for easy assertion.
+        g[23] = 1;
+        g[39] = 2;
+        g.extend_from_slice(bth);
+        g
+    }
+
+    #[test]
+    fn rocev1_grh_then_bth() {
+        // GRH (next header 0x1B = BTH) + RC SEND Only.
+        let bth = bth(0x04, 0x000abc, 7, 0x00, 0x00, 0x00);
+        let payload = grh(0x1b, &bth);
+        let mut d = dis();
+        dissect_grh(&payload, &mut d, &DissectConfig::default(), "RoCE");
+        assert_eq!(d.summary.protocol, "RoCE");
+        assert_eq!(d.summary.src, "::1");
+        assert_eq!(d.summary.dst, "::2");
+        assert!(d.summary.info.contains("RC SEND Only"), "{}", d.summary.info);
+        assert_eq!(extract(&d.tree, "infiniband.bth.destqp"), Some(&Value::Uint(0xabc)));
+        assert_eq!(
+            extract(&d.tree, "infiniband.grh.sgid"),
+            Some(&Value::Str("::1".into()))
+        );
+    }
+
+    #[test]
+    fn native_ib_lrh_local_bth() {
+        // LRH with LNH=0b10 (IBA local: BTH directly), SLID 3 DLID 4.
+        let bth = bth(0x11, 0x000001, 50, 0x00, 0x00, 0x00); // Acknowledge
+        let mut lrh = vec![0u8; LRH_LEN];
+        lrh[1] = 0x02; // SL=0, LNH=0b10
+        lrh[2] = 0x00;
+        lrh[3] = 0x04; // DLID = 4
+        lrh[6] = 0x00;
+        lrh[7] = 0x03; // SLID = 3
+        lrh.extend_from_slice(&bth);
+        // Add a fake AETH so the ACK opcode has its ext header.
+        lrh.extend_from_slice(&[0x00, 0x00, 0x00, 0x05]);
+        let mut d = dis();
+        dissect_lrh(&lrh, &mut d, &DissectConfig::default());
+        assert_eq!(d.summary.protocol, "IB");
+        assert_eq!(d.summary.src, "LID 3");
+        assert_eq!(d.summary.dst, "LID 4");
+        assert!(d.summary.info.contains("Acknowledge"), "{}", d.summary.info);
+        assert_eq!(extract(&d.tree, "infiniband.lrh.slid"), Some(&Value::Uint(3)));
+        assert_eq!(extract(&d.tree, "infiniband.lrh.dlid"), Some(&Value::Uint(4)));
+    }
+
+    #[test]
+    fn native_ib_lrh_global_grh_bth() {
+        // LRH with LNH=0b11 (IBA global: GRH then BTH).
+        let bth = bth(0x04, 0x000fff, 1, 0x00, 0x00, 0x00);
+        let g = grh(0x1b, &bth);
+        let mut lrh = vec![0u8; LRH_LEN];
+        lrh[1] = 0x03; // LNH=0b11
+        lrh.extend_from_slice(&g);
+        let mut d = dis();
+        dissect_lrh(&lrh, &mut d, &DissectConfig::default());
+        assert_eq!(d.summary.protocol, "IB");
+        // GRH overrides the address columns with the GIDs.
+        assert_eq!(d.summary.src, "::1");
+        assert_eq!(d.summary.dst, "::2");
+        assert_eq!(extract(&d.tree, "infiniband.bth.destqp"), Some(&Value::Uint(0xfff)));
+        // Both LRH and GRH nodes are present.
+        assert_eq!(extract(&d.tree, "infiniband.lrh.lnh"), Some(&Value::Uint(3)));
+        assert_eq!(
+            extract(&d.tree, "infiniband.grh.dgid"),
+            Some(&Value::Str("::2".into()))
+        );
+    }
+
+    #[test]
+    fn truncated_grh_and_lrh() {
+        let mut d = dis();
+        dissect_grh(&[0u8; 10], &mut d, &DissectConfig::default(), "RoCE");
+        assert!(d.summary.info.contains("truncated GRH"), "{}", d.summary.info);
+
+        let mut d2 = dis();
+        dissect_lrh(&[0u8; 4], &mut d2, &DissectConfig::default());
+        assert!(d2.summary.info.contains("truncated LRH"), "{}", d2.summary.info);
     }
 }

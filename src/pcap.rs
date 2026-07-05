@@ -12,10 +12,11 @@ const PCAPNG_MAGIC_SHB: u32 = 0x0a0d_0d0a;
 /// Well-known pcap link-layer types (subset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkType {
-    Ethernet,     // 1  (DLT_EN10MB)
+    Ethernet,     // 1   (DLT_EN10MB)
     RawIp,        // 101 (DLT_RAW)
     LinuxSll,     // 113 (DLT_LINUX_SLL)
     Null,         // 0   (DLT_NULL)
+    Infiniband,   // 247 (DLT_INFINIBAND) — native IB, frame starts at the LRH
     Other(u32),
 }
 
@@ -26,6 +27,7 @@ impl LinkType {
             1 => LinkType::Ethernet,
             101 => LinkType::RawIp,
             113 => LinkType::LinuxSll,
+            247 => LinkType::Infiniband,
             x => LinkType::Other(x),
         }
     }
