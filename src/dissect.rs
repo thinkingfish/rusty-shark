@@ -68,6 +68,7 @@ const ETHERTYPE_ARP: u16 = 0x0806;
 const ETHERTYPE_IPV6: u16 = 0x86dd;
 const ETHERTYPE_VLAN: u16 = 0x8100;
 const ETHERTYPE_FLOW_CONTROL: u16 = 0x8808; // IEEE 802.3x PAUSE / 802.1Qbb PFC
+const ETHERTYPE_ROCE: u16 = 0x8915; // RoCEv1: GRH + BTH directly over Ethernet
 
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
@@ -82,6 +83,7 @@ pub fn dissect(pkt: &RawPacket, cfg: &DissectConfig) -> Dissection {
         LinkType::RawIp => dissect_ip_auto(data, &mut d, cfg),
         LinkType::Null => dissect_null(data, &mut d, cfg),
         LinkType::LinuxSll => dissect_linux_sll(data, &mut d, cfg),
+        LinkType::Infiniband => crate::roce::dissect_lrh(data, &mut d, cfg),
         LinkType::Other(n) => {
             d.summary.protocol = "LINK";
             d.summary.info = format!("unsupported DLT {n}, {} bytes", data.len());
@@ -97,6 +99,7 @@ fn ethertype_name(etype: u16) -> &'static str {
         ETHERTYPE_ARP => "ARP",
         ETHERTYPE_VLAN => "802.1Q Virtual LAN",
         ETHERTYPE_FLOW_CONTROL => "MAC Control",
+        ETHERTYPE_ROCE => "RoCE",
         _ => "Unknown",
     }
 }
@@ -150,6 +153,8 @@ fn dissect_ethernet(data: &[u8], d: &mut Dissection, cfg: &DissectConfig) {
         ETHERTYPE_IPV6 => dissect_ipv6(payload, d, cfg),
         ETHERTYPE_ARP => dissect_arp(payload, d),
         ETHERTYPE_FLOW_CONTROL => dissect_flow_control(payload, d),
+        // RoCEv1: the InfiniBand GRH + BTH ride directly on Ethernet.
+        ETHERTYPE_ROCE => crate::roce::dissect_grh(payload, d, cfg, "RoCE"),
         other => {
             d.summary.protocol = "ETH";
             if d.summary.info.is_empty() {

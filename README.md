@@ -24,12 +24,14 @@ capture order.
   interface statistics, decryption secrets, custom) are skipped.
 - Automatic format detection at open time (`CaptureReader`).
 - Link layer: Ethernet (incl. one level of VLAN), Linux SLL, BSD Null
-  loopback, DLT_RAW.
+  loopback, DLT_RAW, and native InfiniBand (DLT 247, LRH-framed).
 - Network layer: IPv4, IPv6, ARP.
 - Transport: TCP (flags, seq/ack/win), UDP, ICMP, ICMPv6.
 - Well-known UDP upper-layer labels: DNS (with qname), DHCP, NTP, mDNS.
-- **RDMA / datacenter:** RoCEv2 (InfiniBand BTH over UDP/4791) — opcode,
-  Dest QP, PSN, RETH/AETH/ImmDt extended headers, CNP, and ECN/FECN/BECN
+- **RDMA / datacenter:** RoCEv2 (InfiniBand BTH over UDP/4791), **RoCEv1**
+  (GRH+BTH over Ethernet, ethertype 0x8915), and **native InfiniBand**
+  (LRH → optional GRH → BTH, pcap DLT 247) — opcode, Dest QP, PSN,
+  RETH/AETH/ImmDt extended headers, CNP, and ECN/FECN/BECN
   congestion flags. Fabric flow control: IEEE 802.3x PAUSE and 802.1Qbb
   PFC (per-priority pause) via ethertype 0x8808. IP ECN codepoints named
   (Not-ECT / ECT(0) / ECT(1) / CE) for v4 and v6.
